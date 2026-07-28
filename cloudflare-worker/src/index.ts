@@ -35,6 +35,8 @@ const EP_RO_STATUS = "/avi/v1/remoteOperation/vehicles/{vin}/events/{eventId}";
 const EP_PARENTAL_ALERT = "/avi/v1/vehicles/{vin}/parentalAlert";
 const EP_VEHICLE_STATE = "/avi/v1/vehicles/{vin}/vehiclestate";
 const EP_VEHICLE_HEALTH = "/avi/v1/vehicles/{vin}/vehicleStatus";
+const EP_VEHICLE_DETAILS = "/avi/v1/vehicles/{vin}";
+const EP_MODEL_CONFIG = "/api/v1/catalog/oem/model/{model}/services/configuration";
 
 /**
  * Read-only settings groups, all served by the single parentalAlert template
@@ -97,28 +99,85 @@ const MAX_HVAC_MINUTES = 30;
 /**
  * Target cabin temperature.
  *
- * [UNVERIFIED] The wire key for temperature inside the immediate remoteAC
- * hvacSettings object is NOT yet confirmed. "frontTemperature" exists in the
- * decompiled app but so far only on the SCHEDULER path
- * (PerformAMSClimateControlRO -> /api/v1/services/climatecontrol/{vin}/schedule,
- * via ConditioningDefinition), which is a different endpoint from
- * /avi/v3/remoteOperation. Until that is settled, temperature is accepted and
- * clamped here but deliberately NOT serialised onto the wire — sending a
- * guessed field name risks the backend rejecting the whole request, which
- * would break seat heat too. Set HVAC_TEMP_FIELD once confirmed.
+ * CONFIRMED by reading the decompiled builder directly
+ * (com/aeris/comms/protocol/mqtt/data/DataRemoteAC.java:119-139, and
+ * Utility.getDataKeyForVehicleOperation():185 which returns the key "dt" for
+ * RemoteAC). The real app sends:
+ *
+ *   { vin, operation:"remoteAC", forced, pinToken,
+ *     dt: { pos: 1, def: 0|1, tmp: <posmap index>, hvacSettings: {...} } }
+ *
+ * Two things follow that we had wrong:
+ *
+ * 1. hvacSettings is NESTED inside "dt", not a top-level sibling. Our earlier
+ *    flat payload still returned {"status":"Started"}, but that is exactly what
+ *    a bare climate start returns — a server that ignores an unrecognised
+ *    top-level key would look identical. That is the most likely explanation
+ *    for never being able to observe the seat heaters actually engaging.
+ *
+ * 2. Temperature is NOT a field of hvacSettings at all.
+ *    ClimateProperty.HVACClimateSettings has exactly eleven members
+ *    (checkNumber, fanMode, functionRequest, operationTime, frontDefrostMode,
+ *    rearDefrostMode, the four seat controls, steeringHeaterControl) and none
+ *    is a temperature. The setpoint rides as the sibling key "tmp", and it is
+ *    NOT degrees — it is a 1-based POSITION INDEX into a per-vehicle lookup
+ *    table. Sending tmp:22 means "position 22", not 22 °C.
  */
-const HVAC_TEMP_FIELD: string | null = null;
-const MIN_HVAC_TEMP_C = 19;
-const MAX_HVAC_TEMP_C = 28;
+
+/** Constant in the app's builder (DataRemoteAC:123). */
+const HVAC_POS = 1;
+
+/**
+ * Celsius -> tmp index, from the vehicle's own posmap.
+ *
+ * The posmap is a server-supplied array of {pos, cel, fah} on the model
+ * configuration endpoint, parsed in RemoteACConfig.java:19-119. It is
+ * per-vehicle, so the selectable temperature range is a property of the car,
+ * not a constant we can hardcode.
+ *
+ * Clamping mirrors DataRemoteAC.m3250b: below the table's minimum -> 1, above
+ * its maximum -> the table size.
+ */
+export interface PosMap {
+  celToPos: Record<string, number>;
+  minC: number;
+  maxC: number;
+  size: number;
+}
+
+function celsiusToPos(posmap: PosMap, celsius: number): number {
+  if (celsius < posmap.minC) return 1;
+  if (celsius > posmap.maxC) return posmap.size;
+  // The app formats the lookup key with one decimal ("22.0"), and the table is
+  // authored in 0.5 steps.
+  const exact = posmap.celToPos[celsius.toFixed(1)];
+  if (exact !== undefined) return exact;
+  // Nearest authored step, so a value between rungs still resolves.
+  let best: number | null = null;
+  let bestDelta = Infinity;
+  for (const [key, pos] of Object.entries(posmap.celToPos)) {
+    const delta = Math.abs(parseFloat(key) - celsius);
+    if (Number.isFinite(delta) && delta < bestDelta) {
+      bestDelta = delta;
+      best = pos;
+    }
+  }
+  return best ?? 1;
+}
+
+/** Fallback bounds, only used to sanity-clamp input before the posmap is known. */
+const MIN_HVAC_TEMP_C = 15;
+const MAX_HVAC_TEMP_C = 32;
 
 export interface ClimateRequest {
   minutes: number;
   temperatureC: number | null;
   options: string[];
+  posmap: PosMap | null;
 }
 
 /**
- * Build the hvacSettings payload for a climate start.
+ * Build the "dt" payload for a climate start, matching the app's builder.
  *
  * Every known option is written explicitly — selected ones to their onValue,
  * unselected ones to their offValue — so the resulting cabin state matches
@@ -130,15 +189,26 @@ function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
   const hvacSettings: Record<string, unknown> = {
     fanMode: "AUTO",
     operationTime: req.minutes,
-    checkNumber: 0,
+    // The app's documented default (HVACSettingConstants.CHECK_NUMBER_DEFAULT).
+    checkNumber: 75,
   };
   for (const [name, cfg] of Object.entries(HVAC_OPTIONS)) {
     hvacSettings[cfg.field] = selected.has(name) ? cfg.onValue : cfg.offValue;
   }
-  if (HVAC_TEMP_FIELD && req.temperatureC !== null) {
-    hvacSettings[HVAC_TEMP_FIELD] = req.temperatureC;
+
+  const dt: Record<string, unknown> = {
+    pos: HVAC_POS,
+    // Mirrors ClimateProperty.isDefrost() — a separate flag from the
+    // front/rearDefrostMode members inside hvacSettings.
+    def: selected.has("defrost_front") || selected.has("defrost_rear") ? 1 : 0,
+    hvacSettings,
+  };
+  // Omitted when the posmap is unavailable: the server then applies its own
+  // default cabin temperature, which is strictly better than guessing an index.
+  if (req.posmap && req.temperatureC !== null) {
+    dt.tmp = celsiusToPos(req.posmap, req.temperatureC);
   }
-  return { hvacSettings };
+  return { dt };
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +549,74 @@ async function runCommand(
   return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
 }
 
+/**
+ * Fetch this vehicle's climate posmap from the model configuration endpoint.
+ *
+ * Path from res/raw/environment (getmodelconfigurations.path); the response
+ * shape is AEModelConfigurationsResponse, whose Config carries
+ * `posmap: [{pos:int, cel:string, fah:string}]`. Returns null rather than
+ * throwing — a missing posmap must degrade to "no temperature control", never
+ * break the climate command itself.
+ *
+ * [UNVERIFIED] This has not been exercised against a live account. Use the
+ * /config route to inspect what actually comes back before trusting `tmp`.
+ */
+async function fetchPosMap(
+  accessToken: string,
+  model: string,
+  year: string,
+  country: string,
+): Promise<{ posmap: PosMap | null; raw: unknown }> {
+  const url =
+    BASE_URL +
+    EP_MODEL_CONFIG.replace("{model}", encodeURIComponent(model)) +
+    `?country=${encodeURIComponent(country)}&year=${encodeURIComponent(year)}`;
+
+  const res = await fetch(url, { headers: sharedHeaders(`Bearer ${accessToken}`) });
+  if (!res.ok) return { posmap: null, raw: `HTTP ${res.status} ${await safeText(res)}` };
+
+  const body = (await res.json().catch(() => null)) as JsonValue;
+  if (body === null) return { posmap: null, raw: null };
+
+  const entries = findKey(body, "posmap");
+  if (!Array.isArray(entries) || entries.length === 0) return { posmap: null, raw: body };
+
+  const celToPos: Record<string, number> = {};
+  let minC = Infinity;
+  let maxC = -Infinity;
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const pos = toInt(entry.pos);
+    const cel = parseFloat(String(scalar(entry.cel) ?? ""));
+    if (pos === null || !Number.isFinite(cel)) continue;
+    celToPos[cel.toFixed(1)] = pos;
+    if (cel < minC) minC = cel;
+    if (cel > maxC) maxC = cel;
+  }
+  if (!Number.isFinite(minC) || !Number.isFinite(maxC)) return { posmap: null, raw: body };
+
+  return { posmap: { celToPos, minC, maxC, size: entries.length }, raw: body };
+}
+
+/** model / year / country for the posmap lookup, off the vehicle details record. */
+async function fetchVehicleIdentity(
+  accessToken: string,
+  vin: string,
+): Promise<{ model: string; year: string; country: string }> {
+  const res = await fetch(
+    BASE_URL + EP_VEHICLE_DETAILS.replace("{vin}", encodeURIComponent(vin)) +
+      "?excludes=tuProfile,salesCodes,saleRecord&includes=category",
+    { headers: sharedHeaders(`Bearer ${accessToken}`) },
+  );
+  if (!res.ok) throw new ApiError(502, `Vehicle details failed: HTTP ${res.status} ${await safeText(res)}`);
+  const body = (await res.json()) as JsonValue;
+  return {
+    model: String(scalar(firstPresent(body, ["model", "modelName", "modelCode"])) ?? ""),
+    year: String(scalar(firstPresent(body, ["year", "modelYear"])) ?? ""),
+    country: String(scalar(firstPresent(body, ["country", "countryCode"])) ?? "CA"),
+  };
+}
+
 async function safeText(res: Response): Promise<string> {
   try {
     return (await res.text()).slice(0, 500);
@@ -700,7 +838,8 @@ export default {
     const isStatus = url.pathname === "/status" && request.method === "GET";
     const isMqttDiscover = url.pathname === "/mqtt-discover" && request.method === "GET";
     const isSettings = url.pathname === "/settings" && request.method === "GET";
-    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings) {
+    const isConfig = url.pathname === "/config" && request.method === "GET";
+    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -738,6 +877,43 @@ export default {
           return json({ success: false, error: `Settings read failed: HTTP ${res.status} ${await safeText(res)}` }, 502);
         }
         return json({ success: true, operation, settings: await res.json() });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    // Read-only. Surfaces this vehicle's climate posmap so the dashboard can
+    // build its temperature selector from the car's real range instead of a
+    // hardcoded guess, and so the raw response can be inspected while the
+    // posmap parsing is still unverified.
+    if (isConfig) {
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const identity = await fetchVehicleIdentity(accessToken, vin);
+        if (!identity.model) {
+          return json({ success: false, error: "Vehicle details had no model", identity }, 502);
+        }
+        const { posmap, raw } = await fetchPosMap(
+          accessToken, identity.model, identity.year, identity.country,
+        );
+        return json({
+          success: true,
+          identity,
+          temperature: posmap
+            ? {
+                minC: posmap.minC,
+                maxC: posmap.maxC,
+                steps: Object.keys(posmap.celToPos)
+                  .map(parseFloat)
+                  .sort((a, b) => a - b),
+                celToPos: posmap.celToPos,
+              }
+            : null,
+          // Kept so the posmap extraction can be checked against ground truth.
+          raw,
+        });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -822,10 +998,27 @@ export default {
       }
       const temperatureC =
         typeof rawTemp === "number" && Number.isFinite(rawTemp)
-          ? Math.max(MIN_HVAC_TEMP_C, Math.min(MAX_HVAC_TEMP_C, Math.round(rawTemp)))
+          ? Math.max(MIN_HVAC_TEMP_C, Math.min(MAX_HVAC_TEMP_C, rawTemp))
           : null;
       optionCount = options.length;
-      extra = buildHvacExtra({ minutes, temperatureC, options });
+
+      // The posmap turns degrees into the "tmp" position index. Best-effort:
+      // if it cannot be fetched we simply omit tmp and let the car use its own
+      // default, rather than failing the whole climate start over it.
+      let posmap: PosMap | null = null;
+      if (temperatureC !== null) {
+        try {
+          const { accessToken } = await login(env);
+          const vin = await getVin(env, accessToken);
+          const identity = await fetchVehicleIdentity(accessToken, vin);
+          if (identity.model) {
+            posmap = (await fetchPosMap(accessToken, identity.model, identity.year, identity.country)).posmap;
+          }
+        } catch {
+          posmap = null;
+        }
+      }
+      extra = buildHvacExtra({ minutes, temperatureC, options, posmap });
     }
 
     try {
