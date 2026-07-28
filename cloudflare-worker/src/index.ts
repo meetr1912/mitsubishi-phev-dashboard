@@ -281,11 +281,12 @@ async function performOperation(
   vin: string,
   pinToken: string,
   operation: string,
+  extra?: Record<string, unknown>,
 ): Promise<unknown> {
   const res = await fetch(BASE_URL + EP_PERFORM_RO, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    body: JSON.stringify({ vin, operation, forced: "false", pinToken }),
+    body: JSON.stringify({ vin, operation, forced: "false", pinToken, ...extra }),
   });
   if (!res.ok) {
     throw new ApiError(502, `Remote operation failed: HTTP ${res.status} ${await safeText(res)}`);
@@ -573,6 +574,26 @@ export default {
     }
     if (typeof action !== "string" || action.length === 0) {
       return json({ success: false, error: "Missing 'action'" }, 400);
+    }
+
+    // --- TEMPORARY diagnostic: test whether remoteAC works over REST (same
+    // endpoint as the confirmed-working lock/unlock/horn/lights/locate), as
+    // an empirical alternative to continuing to chase the MQTT path. Returns
+    // the RAW server response instead of a generic success message, for
+    // debugging. Remove once climate is either confirmed working or ruled out.
+    if (action === "climate_test") {
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const pinToken = await verifyPin(env, accessToken, vin);
+        const result = await performOperation(env, accessToken, vin, pinToken, "remoteAC", {
+          hvacSettings: { fanMode: "AUTO", operationTime: 20, checkNumber: 0 },
+        });
+        return json({ success: true, raw: result });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
     }
 
     // --- Unimplemented (climate family / anything not mapped) -> 501 ---
