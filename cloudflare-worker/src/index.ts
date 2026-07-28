@@ -12,8 +12,11 @@
  * "Known limitations" and the source comments marked [UNVERIFIED].
  *
  * Runtime: Cloudflare Workers (native fetch + Web Crypto SubtleCrypto only,
- * no npm crypto packages).
+ * no npm crypto packages). The MQTT discovery path additionally uses the
+ * `cloudflare:sockets` raw TCP API — see mqtt.ts.
  */
+
+import { mqttDiscoverOperations } from "./mqtt";
 
 // ---------------------------------------------------------------------------
 // Constants (all confirmed from the decompiled app / const.py)
@@ -132,11 +135,21 @@ function sharedHeaders(authorization: string): Record<string, string> {
 // Aeris ATSP flow
 // ---------------------------------------------------------------------------
 
+export interface LoginResult {
+  accessToken: string;
+  accountDN: string;
+  clientId: string;
+}
+
 /**
  * Log in with grant_type=password. A fresh login per command invocation is fine
  * for v1 — no token caching / KV. Confirmed against the working read-only client.
+ *
+ * Also returns accountDN + clientId — both needed for the MQTT client-registration
+ * handshake (registration topics are keyed by accountDN; the MQTT CONNECT username
+ * must be the same clientId used for this login, per C1847g.java:1148-1149).
  */
-async function login(env: Env): Promise<string> {
+async function login(env: Env): Promise<LoginResult> {
   const clientId = crypto.randomUUID();
   const basic = "Basic " + bytesToB64(new TextEncoder().encode(`${clientId}:${CLIENT_TRUSTED_SECRET}`));
 
@@ -153,9 +166,10 @@ async function login(env: Env): Promise<string> {
   if (!res.ok) {
     throw new ApiError(502, `Login failed: HTTP ${res.status} ${await safeText(res)}`);
   }
-  const data = (await res.json()) as { access_token?: string };
+  const data = (await res.json()) as { access_token?: string; accountDN?: string };
   if (!data.access_token) throw new ApiError(502, "Login response missing access_token");
-  return data.access_token;
+  if (!data.accountDN) throw new ApiError(502, "Login response missing accountDN");
+  return { accessToken: data.access_token, accountDN: data.accountDN, clientId };
 }
 
 /** Look up the account's first VIN. Confirmed against the working read-only client. */
@@ -497,7 +511,8 @@ export default {
     const url = new URL(request.url);
     const isCommand = url.pathname === "/command" && request.method === "POST";
     const isStatus = url.pathname === "/status" && request.method === "GET";
-    if (!isCommand && !isStatus) {
+    const isMqttDiscover = url.pathname === "/mqtt-discover" && request.method === "GET";
+    if (!isCommand && !isStatus && !isMqttDiscover) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -509,10 +524,22 @@ export default {
 
     if (isStatus) {
       try {
-        const accessToken = await login(env);
+        const { accessToken } = await login(env);
         const vin = await getVin(env, accessToken);
         const latest = await fetchLiveStatus(env, accessToken, vin);
         return json({ success: true, latest });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    if (isMqttDiscover) {
+      try {
+        const { accessToken, accountDN, clientId } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const discovery = await mqttDiscoverOperations({ accessToken, accountDN, clientId, vin });
+        return json({ success: true, ...discovery });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -542,7 +569,7 @@ export default {
 
     // --- Execute the full flow ---
     try {
-      const accessToken = await login(env);
+      const { accessToken } = await login(env);
       const vin = await getVin(env, accessToken);
       const pinToken = await verifyPin(env, accessToken, vin);
       await performOperation(env, accessToken, vin, pinToken, operation);
