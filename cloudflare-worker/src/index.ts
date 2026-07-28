@@ -37,6 +37,20 @@ const EP_VEHICLE_STATE = "/avi/v1/vehicles/{vin}/vehiclestate";
 const EP_VEHICLE_HEALTH = "/avi/v1/vehicles/{vin}/vehicleStatus";
 const EP_VEHICLE_DETAILS = "/avi/v1/vehicles/{vin}";
 const EP_MODEL_CONFIG = "/api/v1/catalog/oem/model/{model}/services/configuration";
+/**
+ * Wake the telematics unit out of deep sleep BEFORE issuing a remote operation.
+ *
+ * CONFIRMED live (2026-07-28) as the missing step that made commands actually
+ * reach the car: without it PerformRO still returns {eventId, status:"Started"}
+ * but the vehicle never receives the message — GetROStatus then answers
+ * 400 EventNotFound and nothing physically happens. With it, the same command
+ * progresses Started -> MessageDelivered (915) -> Successful (1001) and the
+ * hardware responds (verified with `lights` and `remoteAC`).
+ *
+ * Path from res/raw/environment (vehiclewakeup.path); body from
+ * WakeUpSMSPayload + p151h.C7129r.
+ */
+const EP_VEHICLE_WAKEUP = "/api/v1/services/wakeup/vehicle/{vin}";
 
 /**
  * Read-only settings groups, all served by the single parentalAlert template
@@ -493,7 +507,9 @@ async function performOperation(
   const res = await fetch(BASE_URL + EP_PERFORM_RO, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    body: JSON.stringify({ vin, operation, forced: "false", pinToken, ...extra }),
+    // forced:"true" matches the live app (C9337e passes z10=true) and is what
+    // we verified working end-to-end (lights, remoteAC) on 2026-07-28.
+    body: JSON.stringify({ vin, operation, forced: "true", pinToken, ...extra }),
   });
   if (!res.ok) {
     throw new ApiError(502, `Remote operation failed: HTTP ${res.status} ${await safeText(res)}`);
@@ -570,7 +586,40 @@ async function pollEvent(accessToken: string, vin: string, eventId: string): Pro
   return last;
 }
 
-/** Full command flow: login -> VIN -> PIN token -> submit -> poll to outcome. */
+/**
+ * Wake the TCU, then give it a moment to attach to the network.
+ *
+ * Best-effort: a failed/duplicate wakeup is NOT fatal (the API answers
+ * responseCode "inProgress" / "SMS already initiated" when one is already in
+ * flight, which is a normal success path). Matches the validated Python flow
+ * (scripts/test_na_remote_command.py WAKE_WAIT_S = 25): a shorter 12s settle
+ * was tried here and the command still submitted, but with less margin than
+ * the confirmed-working 25s — use the same wait as the proven flow rather than
+ * a shortened guess.
+ */
+const WAKE_SETTLE_MS = 25000;
+
+async function wakeUpVehicle(accessToken: string, vin: string): Promise<void> {
+  const url = BASE_URL + EP_VEHICLE_WAKEUP.replace("{vin}", encodeURIComponent(vin));
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: sharedHeaders(`Bearer ${accessToken}`),
+      body: JSON.stringify({
+        operation: "wakeUp",
+        operationType: 1,
+        vehicleId: vin,
+        timeStamp: String(Date.now()),
+        data: {},
+      }),
+    });
+  } catch {
+    // Non-fatal: fall through and still attempt the command.
+  }
+  await new Promise((r) => setTimeout(r, WAKE_SETTLE_MS));
+}
+
+/** Full command flow: login -> VIN -> wake -> PIN token -> submit -> poll to outcome. */
 async function runCommand(
   env: Env,
   operation: string,
@@ -578,6 +627,7 @@ async function runCommand(
 ): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
   const { accessToken } = await login(env);
   const vin = await getVin(env, accessToken);
+  await wakeUpVehicle(accessToken, vin);
   const pinToken = await verifyPin(env, accessToken, vin);
   const submitted = await performOperation(env, accessToken, vin, pinToken, operation, extra);
 
@@ -660,6 +710,7 @@ async function runChargingControl(
 ): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
   const { accessToken } = await login(env);
   const vin = await getVin(env, accessToken);
+  await wakeUpVehicle(accessToken, vin);
   const submitted = await performChargingControl(accessToken, vin, direction);
 
   const eventId = (submitted as { correlationId?: unknown } | null)?.correlationId;

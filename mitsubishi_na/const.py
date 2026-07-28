@@ -65,6 +65,46 @@ EP_PIN_TOKEN = "/oauth/v3/remoteOperation/pin"
 EP_PERFORM_RO = "/avi/v3/remoteOperation"
 EP_RO_STATUS = "/avi/v1/remoteOperation/vehicles/{vin}/events/{event_id}"
 
+# Wake the TCU out of deep sleep BEFORE a command — the app fires this first
+# (throttled >=60s). A sleeping vehicle silently drops PerformRO, which is why
+# our earlier lights test did nothing and GetROStatus said EventNotFound.
+# POST body: {"operation":"wakeUp","operationType":1,"vehicleId":vin,
+#             "timeStamp":"<epoch ms>","data":{}}  (WakeUpSMSPayload)
+EP_VEHICLE_WAKEUP = "/api/v1/services/wakeup/vehicle/{vin}"
+
+# Only doorUnlock + locate require a pinToken (RemoteOperationConstants enum
+# requirePin flag). Everything else — lock, lights, horn, climate, charge —
+# does NOT. (Keys are RO_OPERATIONS keys.)
+RO_REQUIRE_PIN = {"door_unlock", "locate"}
+
+# Per-operation `dt` data body (source: Utility.getDataForVehicleOperation +
+# com/aeris/comms/protocol/mqtt/data/Data*). Ops absent here send NO dt object
+# (the app passes an empty config map and PerformRO omits dt when empty).
+#
+# CONFIRMED working:
+#   lights -> DataLights -> {"lct":"1","lt":"0"}   (test: lights flashed, status Successful)
+# CONFIRMED no dt (op name alone): horn, door_lock, door_unlock, locate, climate_stop
+#
+# BEST-EFFORT (payload shape known, exact int values unverified — validate via
+# GetROStatus, which now reports Successful/failed definitively):
+#   charge start/stop -> ChargingControlPayload.chargingControlType (int)
+#   climate_start (remoteAC) -> DataRemoteAC -> {pos, def, tmp(posmap index)}
+#       tmp is a posmap position, NOT a temperature: for this vehicle (DGE/2025/CA)
+#       posmap pos 16 = 25.0C (the app's climate_default_temperature).
+RO_DATA = {
+    "lights": {"lct": "1", "lt": "0"},
+    "charging_start": {"chargingControlType": 1},
+    "charging_stop": {"chargingControlType": 2},
+    # remoteAC (DataRemoteAC + BEClimatePresenter start branch):
+    #   pos=1, def=0 (no defrost), tmp=posmap index (16 => 25C default for DGE),
+    #   hvacSettings gson-serialized: fanMode enum name "VENT_FEET", checkNumber 75,
+    #   operationTime 10 (other seat/defrost fields null => omitted).
+    "climate_start": {
+        "pos": 1, "def": 0, "tmp": 16,
+        "hvacSettings": {"fanMode": "VENT_FEET", "checkNumber": 75, "operationTime": 10},
+    },
+}
+
 # RO_OPERATIONS: the "operation" field value for PerformRO. Source:
 # com/aeris/atsp/service/extras/RemoteOperationConstants.java OperationName enum.
 # (requirePin flags were lost to decompiler obfuscation-stripping — assume all

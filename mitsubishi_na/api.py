@@ -13,8 +13,18 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from .parsers import parse_driving_score
+from .crypto import generate_client_nonce, compute_pin_hash
+
 from .const import (
     NA_BASE_URL,
+    EP_SERVER_NONCE,
+    EP_PIN_TOKEN,
+    EP_PERFORM_RO,
+    EP_VEHICLE_WAKEUP,
+    RO_OPERATIONS,
+    RO_REQUIRE_PIN,
+    RO_DATA,
     NA_PROD_API_KEY,
     CLIENT_TRUSTED_SECRET,
     EP_TOKEN,
@@ -38,6 +48,8 @@ from .const import (
     EP_PARENTAL_ALERT,
     EP_LOCATION,
     EP_SVLA_STATE,
+    EP_VEHICLE_SERVICES,
+    EP_MODEL_CONFIGURATIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,6 +78,7 @@ class MitsubishiNAClient:
         self._token = TokenState()
         self._client_id = str(uuid.uuid4())
         self._http = httpx.AsyncClient(timeout=30.0)
+        self._pin_tokens: dict[str, str] = {}  # vin -> pinToken, cached per session
 
     async def async_close(self) -> None:
         await self._http.aclose()
@@ -143,7 +156,7 @@ class MitsubishiNAClient:
         except httpx.RequestError as err:
             _LOGGER.error("GET %s failed: %s", path, err)
             return None
-        if r.status_code != 200:
+        if not (200 <= r.status_code < 300):
             _LOGGER.debug("GET %s: HTTP %s %s", path, r.status_code, r.text)
             return None
         if not r.text.strip():
@@ -153,6 +166,30 @@ class MitsubishiNAClient:
             return r.json()
         except ValueError:
             _LOGGER.error("GET %s: HTTP 200 non-JSON body: %r", path, r.text)
+            return None
+
+    async def _post(self, path: str, body: dict) -> dict | None:
+        """Authenticated (bearer) POST returning parsed JSON, or None."""
+        if not await self._ensure_token():
+            raise ConnectionError(f"No valid session for {path}")
+        try:
+            r = await self._http.post(
+                f"{NA_BASE_URL}{path}",
+                json=body,
+                headers=self._shared_headers(bearer=True),
+            )
+        except httpx.RequestError as err:
+            _LOGGER.error("POST %s failed: %s", path, err)
+            return None
+        if not (200 <= r.status_code < 300):
+            _LOGGER.debug("POST %s: HTTP %s %s", path, r.status_code, r.text)
+            return None
+        if not r.text.strip():
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            _LOGGER.error("POST %s: HTTP 200 non-JSON body: %r", path, r.text)
             return None
 
     async def async_get_user_info(self) -> dict | None:
@@ -175,6 +212,26 @@ class MitsubishiNAClient:
             params={"excludes": "tuProfile,salesCodes,saleRecord", "includes": "category"},
         )
 
+    async def async_get_vehicle_services(self, vin: str) -> dict | None:
+        """Dedicated per-vehicle service-entitlement list.
+
+        Distinct from vehicle_details' embedded availableServices — separate
+        endpoint, worth checking in case it carries entitlements the details
+        payload doesn't (e.g. a driving-score / eco-score service flag).
+        """
+        return await self._get(
+            EP_VEHICLE_SERVICES.format(vin=vin, account_dn=self._token.account_dn)
+        )
+
+    async def async_get_model_configurations(self, model: str, country: str, year: str) -> dict | None:
+        """Model/region/year service-configuration catalog (posmap, speed/geofence
+        bounds, additionalServices) — where a model-gated feature flag would live.
+        """
+        return await self._get(
+            EP_MODEL_CONFIGURATIONS.format(model=model),
+            params={"country": country, "year": year},
+        )
+
     async def async_get_vehicle_state(self, vin: str) -> dict | None:
         """Odometer / basic vehicle state."""
         return await self._get(EP_VEHICLE_STATE.format(vin=vin))
@@ -182,6 +239,17 @@ class MitsubishiNAClient:
     async def async_get_vehicle_health(self, vin: str, count: int = 1) -> dict | None:
         """Vehicle Health Report (VHR) — battery, range, tire pressure, warnings, etc."""
         return await self._get(EP_VEHICLE_HEALTH.format(vin=vin), params={"count": count})
+
+    async def async_get_driving_score(self, vin: str, count: int = 1) -> dict | None:
+        """Eco-driving score (overall/accel/steer/brake + fuel economy).
+
+        No dedicated endpoint — this rides inside the same VHR (vehicleStatus)
+        response async_get_vehicle_health already fetches, just parsed out.
+        """
+        vhr = await self.async_get_vehicle_health(vin, count=count)
+        if not vhr:
+            return None
+        return parse_driving_score(vhr)
 
     async def async_get_mileage_yearly(self, vehicle_id: str, year: int, timezone: str) -> dict | None:
         """EV vs gas mileage breakdown for a calendar year."""
@@ -300,3 +368,164 @@ class MitsubishiNAClient:
     async def async_get_svla_state(self, vin: str) -> dict | None:
         """Stolen-Vehicle Locator Assistance state."""
         return await self._get(EP_SVLA_STATE.format(vin=vin))
+
+    # ------------------------------------------------------------------
+    # Remote operations (PIN-authorized)
+    # ------------------------------------------------------------------
+
+    async def async_verify_pin(self, vin: str, pin: str) -> str | None:
+        """Run the nonce -> hash -> pinToken handshake, cache and return the token.
+
+        The pinToken authorizes subsequent PerformRO commands. This is the step
+        that was missing when the climate-schedule write reverted.
+        """
+        client_nonce = generate_client_nonce()
+        nonce_resp = await self._post(EP_SERVER_NONCE, {"vin": vin, "clientNonce": client_nonce})
+        server_nonce = (nonce_resp or {}).get("serverNonce")
+        if not server_nonce:
+            _LOGGER.error("GetServerNonce returned no serverNonce: %s", nonce_resp)
+            return None
+
+        pin_hash = compute_pin_hash(client_nonce, server_nonce, pin)
+        token_resp = await self._post(EP_PIN_TOKEN, {"vin": vin, "hash": pin_hash})
+        pin_token = (token_resp or {}).get("pinToken")
+        if not pin_token:
+            _LOGGER.error("GetPinToken returned no pinToken (wrong PIN?): %s", token_resp)
+            return None
+
+        self._pin_tokens[vin] = pin_token
+        return pin_token
+
+    async def _ensure_pin_token(self, vin: str, pin: str) -> str | None:
+        token = self._pin_tokens.get(vin)
+        if token:
+            return token
+        return await self.async_verify_pin(vin, pin)
+
+    async def async_wakeup(self, vin: str) -> dict | None:
+        """Wake the vehicle's TCU out of deep sleep. Call before a command;
+        allow ~15-30s before the vehicle is reachable. Returns the response
+        (responseStatus == "successful" on success).
+        """
+        import time
+        return await self._post(EP_VEHICLE_WAKEUP.format(vin=vin), {
+            "operation": "wakeUp",
+            "operationType": 1,
+            "vehicleId": vin,
+            "timeStamp": str(int(time.time() * 1000)),
+            "data": {},
+        })
+
+    async def async_perform_ro(
+        self, vin: str, operation: str, pin: str | None = None, *,
+        forced: bool = True, data: dict | None = None,
+    ) -> dict | None:
+        """Send a remote operation. `operation` is a raw op string or an
+        RO_OPERATIONS key (e.g. "door_lock"). A pinToken is attached ONLY for
+        ops in RO_REQUIRE_PIN (doorUnlock, locate). The per-op `dt` data body
+        (RO_DATA) is included automatically unless `data` is passed.
+
+        Returns the PerformRO response (includes eventId) or None. Call
+        async_wakeup(vin) first if the car may be asleep.
+        """
+        # operation may be a key ("door_lock") or already-raw ("doorLock")
+        op_key = operation
+        op = RO_OPERATIONS.get(operation, operation)
+
+        body: dict = {
+            "vin": vin,
+            "operation": op,
+            "forced": "true" if forced else "false",
+            "userAgent": "android",
+        }
+
+        dt = data if data is not None else RO_DATA.get(op_key) or RO_DATA.get(op)
+        if dt:
+            body["dt"] = dt
+
+        needs_pin = op_key in RO_REQUIRE_PIN or op in {RO_OPERATIONS[k] for k in RO_REQUIRE_PIN}
+        if needs_pin:
+            if not pin:
+                _LOGGER.error("Operation %s requires a PIN but none was given", op)
+                return None
+            pin_token = await self._ensure_pin_token(vin, pin)
+            if not pin_token:
+                return None
+            body["pinToken"] = pin_token
+
+        resp = await self._post(EP_PERFORM_RO, body)
+        # Stale pinToken is the common transient failure on pin ops — retry once.
+        if resp is None and needs_pin and pin:
+            self._pin_tokens.pop(vin, None)
+            pin_token = await self._ensure_pin_token(vin, pin)
+            if pin_token:
+                body["pinToken"] = pin_token
+                resp = await self._post(EP_PERFORM_RO, body)
+        return resp
+
+    # --- Convenience wrappers. pin only needed for unlock/locate. ---
+
+    async def async_lock(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "door_lock")
+
+    async def async_unlock(self, vin: str, pin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "door_unlock", pin)
+
+    async def async_horn(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "horn")
+
+    async def async_lights(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "lights")
+
+    async def async_locate(self, vin: str, pin: str) -> dict | None:
+        """Car finder — reports GPS position; no physical actuation."""
+        return await self.async_perform_ro(vin, "locate", pin)
+
+    async def async_climate_start(
+        self, vin: str, *, temp_pos: int = 16, defrost: bool = False,
+        seat_fl: bool | None = None, seat_fr: bool | None = None,
+        seat_rl: bool | None = None, seat_rr: bool | None = None,
+        steering: bool | None = None,
+        front_defrost: bool | None = None, rear_defrost: bool | None = None,
+    ) -> dict | None:
+        """Start remote climate (remoteAC).
+
+        temp_pos: posmap position index (16 = 25C default for this DGE; see the
+                  model-config posmap for the full ladder).
+        seat_*/steering/front_defrost/rear_defrost: None = omit (leave as-is),
+                  True = ON, False = OFF. Seats use HEATER_ON/OFF; steering and
+                  defrost use TURN_ON/OFF (per HVACSettingStatus enum names).
+        """
+        hvac: dict = {
+            "fanMode": "DEFROST" if defrost else "VENT_FEET",
+            "checkNumber": 75,
+            "operationTime": 10,
+        }
+        seat = lambda b: "HEATER_ON" if b else "HEATER_OFF"
+        turn = lambda b: "TURN_ON" if b else "TURN_OFF"
+        if seat_fl is not None:
+            hvac["frontLeftSeatControl"] = seat(seat_fl)
+        if seat_fr is not None:
+            hvac["frontRightSeatControl"] = seat(seat_fr)
+        if seat_rl is not None:
+            hvac["rearLeftSeatControl"] = seat(seat_rl)
+        if seat_rr is not None:
+            hvac["rearRightSeatControl"] = seat(seat_rr)
+        if steering is not None:
+            hvac["steeringHeaterControl"] = turn(steering)
+        if front_defrost is not None:
+            hvac["frontDefrostMode"] = turn(front_defrost)
+        if rear_defrost is not None:
+            hvac["rearDefrostMode"] = turn(rear_defrost)
+
+        dt = {"pos": 1, "def": 1 if defrost else 0, "tmp": temp_pos, "hvacSettings": hvac}
+        return await self.async_perform_ro(vin, "climate_start", data=dt)
+
+    async def async_climate_stop(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "climate_stop")
+
+    async def async_charge_start(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "charging_start")
+
+    async def async_charge_stop(self, vin: str) -> dict | None:
+        return await self.async_perform_ro(vin, "charging_stop")
