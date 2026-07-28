@@ -1,0 +1,46 @@
+name: Log vehicle status
+
+on:
+  schedule:
+    # Top of every hour (UTC). GitHub may delay scheduled runs under load.
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+
+# Needed so the job can commit the refreshed data files back to the repo.
+permissions:
+  contents: write
+
+# Avoid overlapping runs racing on the same data file.
+concurrency:
+  group: log-vehicle-status
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Log vehicle status
+        env:
+          MMC_USERNAME: ${{ secrets.MMC_USERNAME }}
+          MMC_PASSWORD: ${{ secrets.MMC_PASSWORD }}
+          DASHBOARD_PASSPHRASE: ${{ secrets.DASHBOARD_PASSPHRASE }}
+        run: python scripts/cron_log_status.py
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/data/*.json
+          # --cached: check staged changes (working tree is clean after `git add`).
+          git diff --cached --quiet || (git commit -m 'chore: update vehicle status' && git push)

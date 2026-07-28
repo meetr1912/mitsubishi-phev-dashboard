@@ -1,0 +1,6 @@
+name = "phev-command-relay"
+main = "src/index.ts"
+compatibility_date = "2025-07-01"
+
+# Secrets are NOT stored here — set them with `wrangler secret put` (see README):
+#   MMC_USERNAME, MMC_PASSWORD, MMC_PIN, DASHBOARD_API_KEY

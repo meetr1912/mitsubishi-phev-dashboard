@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0d1117" />
+  <title>PHEV Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- three.js is ESM-only in modern versions; expose it via an import map so
+       three-scene.js can `import * as THREE from 'three'` with no build step. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+
+  <!-- Tiny pub/sub bootstrap so crypto.js can hand the decrypted data to every
+       other module regardless of load order. Consumers call PHEV.onData(cb);
+       crypto.js calls PHEV.setData(obj) once decryption succeeds. -->
+  <script>
+    window.PHEV = window.PHEV || {};
+    window.PHEV._listeners = [];
+    window.PHEV.data = null;
+    window.PHEV.onData = function (cb) {
+      if (window.PHEV.data) { try { cb(window.PHEV.data); } catch (e) { console.error(e); } }
+      window.PHEV._listeners.push(cb);
+    };
+    window.PHEV.setData = function (d) {
+      window.PHEV.data = d;
+      window.PHEV._listeners.forEach(function (cb) {
+        try { cb(d); } catch (e) { console.error(e); }
+      });
+    };
+  </script>
+</head>
+<body>
+  <!-- ============================= LOCK / PASSWORD GATE ============================= -->
+  <div id="lock-overlay" class="lock-overlay" aria-hidden="false">
+    <div class="lock-card">
+      <div class="lock-logo">⚡</div>
+      <h1>PHEV Dashboard</h1>
+      <p id="lock-sub" class="lock-sub">Enter your dashboard passphrase</p>
+      <form id="pw-form" autocomplete="off">
+        <input id="pw-input" type="password" inputmode="text" placeholder="Passphrase"
+               autocomplete="current-password" aria-label="Dashboard passphrase" />
+        <button id="pw-submit" type="submit">Unlock</button>
+      </form>
+      <p id="pw-error" class="pw-error" role="alert"></p>
+    </div>
+  </div>
+
+  <!-- ============================= SETTINGS MODAL ============================= -->
+  <div id="settings-modal" class="modal" aria-hidden="true">
+    <div class="modal-card">
+      <h2>Settings</h2>
+      <label for="api-key-input">Dashboard command key
+        <span class="hint">(sent as <code>X-Dashboard-Key</code> to the Worker)</span>
+      </label>
+      <input id="api-key-input" type="password" placeholder="Paste your X-Dashboard-Key"
+             autocomplete="off" aria-label="Dashboard command key" />
+      <div class="modal-actions">
+        <button id="settings-save" type="button" class="btn-primary">Save</button>
+        <button id="settings-close" type="button" class="btn-ghost">Close</button>
+      </div>
+      <p class="hint small">Stored locally in this browser only (localStorage <code>phev_dash_api_key</code>).</p>
+    </div>
+  </div>
+
+  <!-- ============================= APP ============================= -->
+  <main id="app" class="app">
+    <header class="app-header">
+      <div class="header-titles">
+        <h1 id="veh-nickname">—</h1>
+        <p id="veh-model" class="veh-model">—</p>
+        <p id="veh-updated" class="veh-updated">Waiting for data…</p>
+      </div>
+      <div class="header-actions">
+        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">⚙️</button>
+        <button id="btn-logout" class="icon-btn" title="Log out" aria-label="Log out">⏻</button>
+      </div>
+    </header>
+
+    <!-- 3D hero -->
+    <section class="hero">
+      <canvas id="car-canvas" aria-label="3D vehicle status visualization"></canvas>
+      <div id="car-fallback" class="car-fallback" hidden>3D view unavailable on this device.</div>
+    </section>
+
+    <!-- Stat tiles -->
+    <section class="tiles" id="tiles">
+      <div class="tile" id="tile-battery">
+        <span class="tile-label">Battery</span>
+        <span class="tile-value" data-field="battery">—</span>
+        <div class="battery-bar"><div class="battery-fill" id="battery-fill"></div></div>
+      </div>
+      <div class="tile"><span class="tile-label">EV range</span><span class="tile-value" data-field="ev_range">—</span></div>
+      <div class="tile"><span class="tile-label">Gas range</span><span class="tile-value" data-field="gas_range">—</span></div>
+      <div class="tile"><span class="tile-label">Total range</span><span class="tile-value" data-field="total_range">—</span></div>
+      <div class="tile"><span class="tile-label">Odometer</span><span class="tile-value" data-field="odometer">—</span></div>
+      <div class="tile"><span class="tile-label">Charging</span><span class="tile-value" data-field="charging">—</span></div>
+      <div class="tile"><span class="tile-label">Plugged in</span><span class="tile-value" data-field="plugged">—</span></div>
+      <div class="tile"><span class="tile-label">Time to full</span><span class="tile-value" data-field="ttf">—</span></div>
+    </section>
+
+    <!-- Doors & lights -->
+    <section class="panel">
+      <h2 class="panel-title">Doors &amp; lights</h2>
+      <div class="doors" id="doors">
+        <div class="door" data-door="front_left"><span class="door-icon">🚪</span><span class="door-name">Front L</span><span class="door-state">—</span></div>
+        <div class="door" data-door="front_right"><span class="door-icon">🚪</span><span class="door-name">Front R</span><span class="door-state">—</span></div>
+        <div class="door" data-door="rear_left"><span class="door-icon">🚪</span><span class="door-name">Rear L</span><span class="door-state">—</span></div>
+        <div class="door" data-door="rear_right"><span class="door-icon">🚪</span><span class="door-name">Rear R</span><span class="door-state">—</span></div>
+        <div class="door" data-door="hood"><span class="door-icon">🛠️</span><span class="door-name">Hood</span><span class="door-state">—</span></div>
+        <div class="door" data-door="trunk"><span class="door-icon">🎒</span><span class="door-name">Trunk</span><span class="door-state">—</span></div>
+        <div class="door" data-door="headlights"><span class="door-icon">💡</span><span class="door-name">Lights</span><span class="door-state">—</span></div>
+      </div>
+    </section>
+
+    <!-- Commands -->
+    <section class="panel">
+      <h2 class="panel-title">Remote commands</h2>
+      <div class="commands" id="commands">
+        <button class="cmd-btn" data-action="lock">🔒 Lock</button>
+        <button class="cmd-btn" data-action="unlock">🔓 Unlock</button>
+        <button class="cmd-btn" data-action="horn">📣 Horn</button>
+        <button class="cmd-btn" data-action="lights">💡 Lights</button>
+        <button class="cmd-btn" data-action="locate">📍 Locate</button>
+        <button class="cmd-btn cmd-disabled" data-action="defrost" disabled title="Not available yet">❄️ Defrost (coming soon)</button>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="panel">
+      <h2 class="panel-title">Battery history</h2>
+      <div class="chart-wrap"><canvas id="chart-battery"></canvas></div>
+      <p class="chart-empty" id="empty-battery" hidden>No history yet.</p>
+    </section>
+    <section class="panel">
+      <h2 class="panel-title">Odometer history</h2>
+      <div class="chart-wrap"><canvas id="chart-odometer"></canvas></div>
+      <p class="chart-empty" id="empty-odometer" hidden>No history yet.</p>
+    </section>
+    <section class="panel">
+      <h2 class="panel-title">Monthly distance</h2>
+      <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
+      <p class="chart-empty" id="empty-monthly" hidden>No history yet.</p>
+    </section>
+
+    <footer class="app-footer">
+      <span id="veh-vin">—</span>
+    </footer>
+  </main>
+
+  <!-- Toast container -->
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <!-- Chart.js (UMD global `Chart`) then our chart module -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+
+  <!-- App modules (plain scripts, communicate through window.PHEV) -->
+  <script src="crypto.js" defer></script>
+  <script src="app.js" defer></script>
+  <script src="charts.js" defer></script>
+
+  <!-- three-scene is an ES module (imports three) -->
+  <script type="module" src="three-scene.js"></script>
+</body>
+</html>
