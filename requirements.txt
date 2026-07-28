@@ -1,3 +1,0 @@
-# Runtime deps for scripts/cron_log_status.py (the hourly dashboard logger).
-httpx>=0.27,<1.0        # async HTTP client used by mitsubishi_na/api.py
-cryptography>=42.0      # PBKDF2HMAC + AES-256-GCM for the encrypted data file
