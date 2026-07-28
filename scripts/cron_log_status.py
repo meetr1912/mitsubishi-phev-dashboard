@@ -821,9 +821,19 @@ def update_rollups(prior_rollups: dict, hourly: list, monthly_distance: list,
     }
 
     # --- Daily: recompute complete (< today) & fully-retained days only. ---
+    # Today itself is deliberately never written into daily_by_date (the cache
+    # that persists across runs) so a partial day can never get frozen in as
+    # if it were final. But surfacing NOTHING for today until midnight UTC
+    # meant every chart (daily, and monthly/yearly which are built from daily)
+    # stayed empty for a day's worth of every fresh deployment. today_partial
+    # is recomputed fresh from `hourly` every run and appended below —
+    # never cached, never subject to the freeze/retention logic above.
+    today_partial = None
     for r in compute_daily_rollups(hourly):
         d = r["date"]
         if d >= today_str:
+            if d == today_str:
+                today_partial = dict(r, partial=True)
             continue  # today is still accumulating
         if f"{d}T00:00:00Z" < hourly_cutoff:
             continue  # straddles the hourly-prune boundary -> keep frozen value
@@ -831,6 +841,8 @@ def update_rollups(prior_rollups: dict, hourly: list, monthly_distance: list,
     # Prune daily rollups to their retention window.
     daily_by_date = {d: r for d, r in daily_by_date.items() if d >= daily_cutoff}
     daily_list = [daily_by_date[d] for d in sorted(daily_by_date)]
+    if today_partial is not None:
+        daily_list.append(today_partial)
 
     # --- Monthly: recompute months whose daily source is fully retained. ---
     for r in compute_monthly_rollups(daily_list, monthly_distance):

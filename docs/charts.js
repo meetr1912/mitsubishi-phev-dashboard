@@ -113,6 +113,9 @@
 
   // Daily distance-driven bar chart from the new daily rollup
   // (rollups.daily[].odometer_km.distance_km). Defensive: missing -> null bar.
+  // The last entry may be `partial: true` (today, still accumulating, never
+  // frozen into history) — drawn in a dimmer shade and labeled "Today" rather
+  // than a bare date so it reads as "so far", not a finished/comparable day.
   function renderDaily(days) {
     var has = days && days.length > 0;
     toggleEmpty("empty-daily", !has);
@@ -120,10 +123,13 @@
     if (!canvas) return;
     destroy("daily");
     if (!has) return;
-    var labels = days.map(function (d) { return d.date; });
+    var labels = days.map(function (d) { return d.partial ? "Today (so far)" : d.date; });
     var data = days.map(function (d) {
       var o = d.odometer_km;
       return (o && typeof o === "object" && o.distance_km != null) ? o.distance_km : null;
+    });
+    var colors = days.map(function (d) {
+      return d.partial ? "rgba(140,232,208,0.2)" : "rgba(140,232,208,0.45)";
     });
     charts.daily = new Chart(canvas.getContext("2d"), {
       type: "bar",
@@ -132,7 +138,7 @@
         datasets: [{
           label: "Distance (km)",
           data: data,
-          backgroundColor: "rgba(140,232,208,0.45)",
+          backgroundColor: colors,
           borderColor: COLORS.accent2,
           borderWidth: 1, borderRadius: 4
         }]
