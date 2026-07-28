@@ -170,36 +170,51 @@ export async function mqttDiscoverOperations(opts: {
   clientId: string;
   vin: string;
 }): Promise<DiscoveryResult> {
+  let stage = "tcp_connecting";
   const socket = connect(
     { hostname: "us-m.aerpf.com", port: 18883 },
     { secureTransport: "on", allowHalfOpen: false },
   );
-  await socket.opened;
+
+  try {
+    await socket.opened;
+    stage = "tcp_opened";
+  } catch (err) {
+    throw new Error(`[stage=${stage}] TCP/TLS open failed: ${(err as Error).message}`);
+  }
 
   const writer = socket.writable.getWriter();
   const reader = new MqttReader(socket.readable.getReader());
 
   try {
     // 1. CONNECT — username=clientId, password=accessToken (C1847g.java:1148-1149).
+    stage = "sending_connect";
     await writer.write(
       buildConnect({ clientId: opts.clientId, username: opts.clientId, password: opts.accessToken, keepAlive: 30 }),
     );
+    stage = "awaiting_connack";
     const connack = await reader.readPacket(15000);
     if (connack.type !== PACKET_CONNACK) throw new Error(`Expected CONNACK, got packet type ${connack.type}`);
     if (connack.payload[1] !== 0) throw new Error(`MQTT CONNECT rejected — return code ${connack.payload[1]}`);
+    stage = "connack_ok";
 
     // 2. SUBSCRIBE to the response topic before publishing the request.
     const responseTopic = `/clientregistrationresponse/${opts.accountDN}`;
     const requestTopic = `/clientregistration/${opts.accountDN}`;
+    stage = "sending_subscribe";
     await writer.write(buildSubscribe(1, responseTopic, 0));
+    stage = "awaiting_suback";
     const suback = await reader.readPacket(15000);
     if (suback.type !== PACKET_SUBACK) throw new Error(`Expected SUBACK, got packet type ${suback.type}`);
+    stage = "suback_ok";
 
     // 3. PUBLISH the registration request (SECURE_PAYLOAD=true -> {"p":[...]} envelope).
+    stage = "sending_registration_publish";
     const requestBody = JSON.stringify({ p: [{ accountDN: opts.accountDN }] });
     await writer.write(buildPublish(requestTopic, new TextEncoder().encode(requestBody), 0));
 
     // 4. Wait for the response PUBLISH (ignore stray PINGRESP/etc while waiting).
+    stage = "awaiting_registration_response";
     let responsePacket: MqttPacket | null = null;
     for (let attempts = 0; attempts < 8; attempts++) {
       const pkt = await reader.readPacket(20000);
@@ -210,6 +225,7 @@ export async function mqttDiscoverOperations(opts: {
       if (pkt.type === PACKET_PINGRESP) continue;
     }
     if (!responsePacket) throw new Error("No registration response received within timeout");
+    stage = "registration_response_received";
 
     // PUBLISH variable header (QoS0): 2-byte topic length + topic bytes, then payload.
     const topicLen = (responsePacket.payload[0] << 8) | responsePacket.payload[1];
@@ -266,6 +282,9 @@ export async function mqttDiscoverOperations(opts: {
     });
 
     return { sessionKey, chKeyExpirationSeconds, operations, raw: parsed };
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    throw new Error(msg.startsWith("[stage=") ? msg : `[stage=${stage}] ${msg}`);
   } finally {
     try {
       await writer.write(buildPacket(PACKET_DISCONNECT, 0, []));
