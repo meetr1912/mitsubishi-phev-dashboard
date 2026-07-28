@@ -52,6 +52,13 @@ export interface Env {
   MMC_PASSWORD: string; // Mitsubishi Connect account password
   MMC_PIN: string; // 4-digit remote-operation PIN
   DASHBOARD_API_KEY: string; // shared secret the dashboard sends as X-Dashboard-Key
+  // Fixed device identity (generate once with `uuidgen` or `openssl rand -hex 16`,
+  // set via `wrangler secret put MMC_CLIENT_ID`, never change it). The real app
+  // generates this once per install and reuses it forever — a fresh random one
+  // per request (what we did before) may be why Mitsubishi's MQTT backend never
+  // routes the client-registration response back to us: REST doesn't seem to
+  // care about client-id novelty, but MQTT's device-routing plausibly does.
+  MMC_CLIENT_ID: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +157,7 @@ export interface LoginResult {
  * must be the same clientId used for this login, per C1847g.java:1148-1149).
  */
 async function login(env: Env): Promise<LoginResult> {
-  const clientId = crypto.randomUUID();
+  const clientId = env.MMC_CLIENT_ID;
   const basic = "Basic " + bytesToB64(new TextEncoder().encode(`${clientId}:${CLIENT_TRUSTED_SECRET}`));
 
   const res = await fetch(BASE_URL + EP_TOKEN, {
