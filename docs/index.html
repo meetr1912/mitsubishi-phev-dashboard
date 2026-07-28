@@ -61,6 +61,16 @@
         <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
       </symbol>
 
+      <symbol id="icon-faceid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8V6a2 2 0 0 1 2-2h2" />
+        <path d="M16 4h2a2 2 0 0 1 2 2v2" />
+        <path d="M20 16v2a2 2 0 0 1-2 2h-2" />
+        <path d="M8 20H6a2 2 0 0 1-2-2v-2" />
+        <circle cx="9" cy="10" r="0.9" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="10" r="0.9" fill="currentColor" stroke="none" />
+        <path d="M9 15c1 1 5 1 6 0" />
+      </symbol>
+
       <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M20 11a8 8 0 1 0-.7 4.3" />
         <path d="M20 5v6h-6" />
@@ -208,6 +218,20 @@
       <svg class="lock-logo" aria-hidden="true"><use href="#icon-bolt" /></svg>
       <h1>PHEV Dashboard</h1>
       <p id="lock-sub" class="lock-sub">Enter your dashboard passphrase</p>
+
+      <!-- Shown instead of the passphrase form when Face ID lock is turned on
+           in Settings. Local device check only -- there's no server to
+           verify against, so this is a fast speed bump against someone
+           picking up an unlocked phone, not encryption. "Use passphrase
+           instead" always stays one tap away. -->
+      <div id="faceid-gate" hidden>
+        <button id="faceid-unlock-btn" type="button" class="btn-primary faceid-btn">
+          <svg aria-hidden="true"><use href="#icon-faceid" /></svg>
+          Unlock with Face ID
+        </button>
+        <button id="faceid-fallback-btn" type="button" class="btn-ghost faceid-btn">Use passphrase instead</button>
+      </div>
+
       <form id="pw-form" autocomplete="off">
         <input id="pw-input" type="password" inputmode="text" placeholder="Passphrase"
                autocomplete="current-password" aria-label="Dashboard passphrase" />
@@ -226,11 +250,23 @@
       </label>
       <input id="api-key-input" type="password" placeholder="Paste your X-Dashboard-Key"
              autocomplete="off" aria-label="Dashboard command key" />
+      <p class="hint small">Stored locally in this browser only (localStorage <code>phev_dash_api_key</code>).</p>
+
+      <!-- Feature-detected: only shown when the device actually has a
+           platform authenticator (Face ID / Touch ID) available. -->
+      <div class="settings-row" id="faceid-row" hidden>
+        <label class="charge-enable">
+          <input type="checkbox" id="faceid-toggle" />
+          <span>Require Face ID to open this app</span>
+        </label>
+        <p class="hint small">Local device check only — a speed bump against a borrowed unlocked
+          phone, not encryption. "Use passphrase instead" always works if Face ID has an issue.</p>
+      </div>
+
       <div class="modal-actions">
         <button id="settings-save" type="button" class="btn-primary">Save</button>
         <button id="settings-close" type="button" class="btn-ghost">Close</button>
       </div>
-      <p class="hint small">Stored locally in this browser only (localStorage <code>phev_dash_api_key</code>).</p>
     </div>
   </div>
 

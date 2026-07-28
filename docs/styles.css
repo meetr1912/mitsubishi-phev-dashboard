@@ -197,6 +197,13 @@ button {
 .btn-primary { background: var(--accent); color: var(--ink); }
 .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-mid); }
 .hint.small { margin-top: 0.8rem; }
+.settings-row { margin: 1.1rem 0; padding-top: 1.1rem; border-top: 1px solid var(--border); }
+.settings-row .charge-enable { margin-bottom: 0.4rem; }
+
+/* ============================= FACE ID GATE ============================= */
+#faceid-gate { display: flex; flex-direction: column; gap: 0.7rem; margin-bottom: 0.7rem; }
+.faceid-btn { display: flex; align-items: center; justify-content: center; gap: 0.5rem; width: 100%; }
+.faceid-btn svg { width: 20px; height: 20px; flex-shrink: 0; }
 
 /* ============================= APP SHELL ============================= */
 .app {

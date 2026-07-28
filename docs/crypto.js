@@ -16,6 +16,7 @@
   var LS_PW = "phev_dash_pw";
   var LS_PW_TS = "phev_dash_pw_ts";
   var LS_API_KEY = "phev_dash_api_key";
+  var LS_FACEID = "phev_dash_faceid_cred_id"; // presence = Face ID lock is on
   var MAX_AGE_MS = 365 * 24 * 60 * 60 * 1000; // ~365 days
   var META_URL = "./data/meta.json";
   var DATA_URL = "./data/history.enc.json";
@@ -35,6 +36,12 @@
   var btnSettings = document.getElementById("btn-settings");
   var btnLogout = document.getElementById("btn-logout");
 
+  var faceidRow = document.getElementById("faceid-row");
+  var faceidToggle = document.getElementById("faceid-toggle");
+  var faceidGate = document.getElementById("faceid-gate");
+  var faceidUnlockBtn = document.getElementById("faceid-unlock-btn");
+  var faceidFallbackBtn = document.getElementById("faceid-fallback-btn");
+
   // ---- Expose API-key getter for app.js ----
   window.PHEV.getApiKey = function () {
     try { return localStorage.getItem(LS_API_KEY) || ""; } catch (e) { return ""; }
@@ -47,6 +54,12 @@
     var bytes = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes;
+  }
+  function bytesToB64(bytes) {
+    var arr = new Uint8Array(bytes);
+    var bin = "";
+    for (var i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin);
   }
 
   // ---- crypto core ----
@@ -125,6 +138,115 @@
     return null;
   }
 
+  // ---- Face ID lock (WebAuthn platform authenticator) ----
+  // Client-side only: there's no server here to verify a WebAuthn signature
+  // against, so a successfully RESOLVED navigator.credentials.get() call is
+  // treated as the gate -- this is a fast speed bump against someone picking
+  // up an unlocked phone with the app already installed, not a cryptographic
+  // boundary. The actual secrets (passphrase, dashboard key) are unchanged;
+  // this only gates whether the UI proceeds to use the cached ones.
+  function getFaceIdCredId() {
+    try { return localStorage.getItem(LS_FACEID); } catch (e) { return null; }
+  }
+  function setFaceIdCredId(b64) {
+    try {
+      if (b64) localStorage.setItem(LS_FACEID, b64);
+      else localStorage.removeItem(LS_FACEID);
+    } catch (e) { /* private mode: ignore */ }
+  }
+  function webAuthnSupported() {
+    return !!(window.PublicKeyCredential && navigator.credentials);
+  }
+
+  async function registerFaceId() {
+    var cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: "PHEV Dashboard" },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: "phev-dashboard",
+          displayName: "PHEV Dashboard"
+        },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+        timeout: 60000
+      }
+    });
+    setFaceIdCredId(bytesToB64(cred.rawId));
+  }
+
+  async function initFaceIdSetting() {
+    if (!faceidRow || !faceidToggle || !webAuthnSupported()) return;
+    if (!window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) return;
+    var available = false;
+    try {
+      available = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    } catch (e) { return; }
+    if (!available) return;
+    faceidRow.hidden = false;
+    faceidToggle.checked = !!getFaceIdCredId();
+  }
+
+  if (faceidToggle) {
+    faceidToggle.addEventListener("change", async function () {
+      if (faceidToggle.checked) {
+        try {
+          await registerFaceId();
+        } catch (e) {
+          faceidToggle.checked = false;
+        }
+      } else {
+        setFaceIdCredId(null);
+      }
+    });
+  }
+  initFaceIdSetting();
+
+  function showFaceidGate() {
+    if (form) form.hidden = true;
+    if (faceidGate) faceidGate.hidden = false;
+  }
+  function showPassphraseForm() {
+    if (faceidGate) faceidGate.hidden = true;
+    if (form) form.hidden = false;
+  }
+
+  async function tryFaceId() {
+    setError("");
+    faceidUnlockBtn.disabled = true;
+    subEl.textContent = "Waiting for Face ID…";
+    try {
+      var credId = b64ToBytes(getFaceIdCredId());
+      await navigator.credentials.get({
+        publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          allowCredentials: [{ id: credId, type: "public-key" }],
+          userVerification: "required",
+          timeout: 60000
+        }
+      });
+      // Resolving at all means the platform authenticator verified the
+      // user -- proceed to the normal cached-passphrase unlock.
+      await attemptCachedUnlock();
+    } catch (e) {
+      subEl.textContent = "Face ID lock is on for this app";
+      setError("Face ID didn't complete — try again, or use your passphrase.");
+    } finally {
+      faceidUnlockBtn.disabled = false;
+    }
+  }
+
+  if (faceidUnlockBtn) faceidUnlockBtn.addEventListener("click", tryFaceId);
+  if (faceidFallbackBtn) {
+    faceidFallbackBtn.addEventListener("click", function () {
+      setError("");
+      subEl.textContent = "Enter your dashboard passphrase";
+      showPassphraseForm();
+      input.focus();
+    });
+  }
+
   function hideOverlay() {
     overlay.classList.add("hidden");
     overlay.setAttribute("aria-hidden", "true");
@@ -197,21 +319,22 @@
       localStorage.removeItem(LS_PW);
       localStorage.removeItem(LS_PW_TS);
       localStorage.removeItem(LS_API_KEY);
+      localStorage.removeItem(LS_FACEID);
     } catch (e) { /* ignore */ }
     location.reload();
   });
 
   // ---- auto-unlock from cache on load ----
-  (async function boot() {
+  async function attemptCachedUnlock() {
     var pw = cachedPassphrase();
-    if (!pw) { showOverlay(); input.focus(); return; }
+    if (!pw) { showPassphraseForm(); input.focus(); return; }
     subEl.textContent = "Unlocking…";
     try {
       var data = await unlock(pw);
       await onUnlockSuccess(data, pw, true); // refresh timestamp
     } catch (e) {
       // Cached passphrase failed (rotated key) or data not published yet.
-      showOverlay();
+      showPassphraseForm();
       subEl.textContent = "Enter your dashboard passphrase";
       if (e.code === "meta_missing" || e.code === "data_missing") {
         setError("No data available yet — try again later.");
@@ -222,5 +345,18 @@
       }
       input.focus();
     }
+  }
+
+  (async function boot() {
+    // Face ID is opt-in and only ever gates the FIRST step: if it's on but
+    // this device/browser can't do WebAuthn right now (moved browsers,
+    // cleared permissions, whatever), fall straight through to the normal
+    // passphrase flow rather than stranding the user.
+    if (getFaceIdCredId() && webAuthnSupported()) {
+      showFaceidGate();
+      subEl.textContent = "Face ID lock is on for this app";
+      return;
+    }
+    await attemptCachedUnlock();
   })();
 })();
