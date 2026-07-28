@@ -198,19 +198,20 @@ async function computePinHash(pin: string, clientNonceBytes: Uint8Array, serverN
 }
 
 /**
- * Full PIN-verification handshake, returning the verified pinHash.
+ * Full PIN-verification handshake, returning the server-issued pinToken.
  *
- * [UNVERIFIED] The request/response shapes below (field names clientNonce /
- * serverNonce / internalVin / pinHash, and the two-step nonce->pin flow) are a
- * faithful port of the spec but have NOT been confirmed against a live NA
- * response. internalVin is passed equal to vin (see spec note); if this platform
- * distinguishes them, this is where it would break.
+ * CONFIRMED against decompiled call classes (p283p.C8761b = GetServerNonce,
+ * p283p.C8760a = GetPinToken):
+ *   Step 1  POST /oauth/v3/remoteOperation       body {vin, clientNonce}
+ *           -> {vin, serverNonce}
+ *   Step 2  POST /oauth/v3/remoteOperation/pin    body {vin, hash: pinHash}
+ *           -> {vin, pinToken}
+ * Neither request has an internalVin field — that was our own earlier mistake.
+ * The value used downstream in PerformRO is the server's returned pinToken,
+ * NOT the locally-computed hash.
  */
 async function verifyPin(env: Env, accessToken: string, vin: string): Promise<string> {
-  // Matches the proven-working EU reference client (secrets.token_bytes(32)) —
-  // a 16-byte nonce was accepted by /remoteOperation (step 1) but broke the
-  // server-side hash generation in /remoteOperation/pin (step 2, HTTP 500
-  // "Error while generating client Auth Hash Token request").
+  // Matches the proven-working EU reference client (secrets.token_bytes(32)).
   const clientNonceBytes = randomBytes(32);
   const clientNonceB64 = bytesToB64(clientNonceBytes);
 
@@ -218,7 +219,7 @@ async function verifyPin(env: Env, accessToken: string, vin: string): Promise<st
   const nonceRes = await fetch(BASE_URL + EP_SERVER_NONCE, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    body: JSON.stringify({ vin, internalVin: vin, clientNonce: clientNonceB64 }),
+    body: JSON.stringify({ vin, clientNonce: clientNonceB64 }),
   });
   if (!nonceRes.ok) {
     throw new ApiError(502, `Server-nonce request failed: HTTP ${nonceRes.status} ${await safeText(nonceRes)}`);
@@ -227,45 +228,47 @@ async function verifyPin(env: Env, accessToken: string, vin: string): Promise<st
   if (!nonceData.serverNonce) throw new ApiError(502, "Server-nonce response missing serverNonce");
   const serverNonceBytes = b64ToBytes(nonceData.serverNonce);
 
-  // Step 2: derive the pinHash and submit it.
+  // Step 2: derive the hash and submit it, in exchange for a pinToken.
   const pinHash = await computePinHash(env.MMC_PIN, clientNonceBytes, serverNonceBytes);
 
   const pinRes = await fetch(BASE_URL + EP_PIN_TOKEN, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    body: JSON.stringify({ vin, internalVin: vin, pinHash }),
+    body: JSON.stringify({ vin, hash: pinHash }),
   });
   if (!pinRes.ok) {
     throw new ApiError(502, `PIN verification rejected: HTTP ${pinRes.status} ${await safeText(pinRes)}`);
   }
-  return pinHash;
+  const pinData = (await pinRes.json()) as { pinToken?: string };
+  if (!pinData.pinToken) throw new ApiError(502, "PIN-token response missing pinToken");
+  return pinData.pinToken;
 }
 
 /**
  * Perform the mapped remote operation.
  *
- * [UNVERIFIED] The endpoint path (/avi/v3/remoteOperation), the body field names
- * (vin / internalVin / pinHash / operation) and the operation values (doorLock,
- * doorUnlock, horn, lights, locate) are a best-effort reconstruction. This whole
- * call is genuinely unverified against a live response.
+ * CONFIRMED against decompiled call class p331s.C9336d (base "PerformRO"
+ * class used by simple commands): body is {vin, operation, forced, pinToken},
+ * no internalVin. Operation name strings (doorLock, doorUnlock, horn, lights,
+ * locate) confirmed from RemoteOperationConstants.OperationName enum.
  */
 async function performOperation(
   env: Env,
   accessToken: string,
   vin: string,
-  pinHash: string,
+  pinToken: string,
   operation: string,
 ): Promise<unknown> {
   const res = await fetch(BASE_URL + EP_PERFORM_RO, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    body: JSON.stringify({ vin, internalVin: vin, pinHash, operation }),
+    body: JSON.stringify({ vin, operation, forced: "false", pinToken }),
   });
   if (!res.ok) {
     throw new ApiError(502, `Remote operation failed: HTTP ${res.status} ${await safeText(res)}`);
   }
-  // Response shape unknown; return whatever parses (or null) so the caller can
-  // relay a generic success.
+  // Real response shape: {eventId, vin, operationType, status} — not our
+  // Worker's own {success,message} shape, which is applied by the caller.
   try {
     return await res.json();
   } catch {
@@ -327,8 +330,8 @@ export default {
     try {
       const accessToken = await login(env);
       const vin = await getVin(env, accessToken);
-      const pinHash = await verifyPin(env, accessToken, vin);
-      await performOperation(env, accessToken, vin, pinHash, operation);
+      const pinToken = await verifyPin(env, accessToken, vin);
+      await performOperation(env, accessToken, vin, pinToken, operation);
       return json({ success: true, message: `Command '${action}' sent to vehicle.` });
     } catch (err) {
       if (err instanceof ApiError) {
