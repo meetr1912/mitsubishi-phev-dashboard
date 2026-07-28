@@ -106,6 +106,12 @@
       <div class="tile"><span class="tile-label">Time to full</span><span class="tile-value" data-field="ttf">—</span></div>
     </section>
 
+    <!-- Warnings (hidden unless something is actually wrong) -->
+    <section class="panel panel-warn" id="warnings-panel" hidden>
+      <h2 class="panel-title">⚠️ Active warnings</h2>
+      <div class="warnings" id="warnings"></div>
+    </section>
+
     <!-- Doors & lights -->
     <section class="panel">
       <h2 class="panel-title">Doors &amp; lights</h2>
@@ -117,6 +123,17 @@
         <div class="door" data-door="hood"><span class="door-icon">🛠️</span><span class="door-name">Hood</span><span class="door-state">—</span></div>
         <div class="door" data-door="trunk"><span class="door-icon">🎒</span><span class="door-name">Trunk</span><span class="door-state">—</span></div>
         <div class="door" data-door="headlights"><span class="door-icon">💡</span><span class="door-name">Lights</span><span class="door-state">—</span></div>
+      </div>
+    </section>
+
+    <!-- Tire pressure -->
+    <section class="panel">
+      <h2 class="panel-title">Tire pressure <span class="panel-unit">(bar)</span></h2>
+      <div class="tires" id="tires">
+        <div class="tire" data-tire="front_left"><span class="tire-pos">Front L</span><span class="tire-value" data-tire-field="front_left">—</span></div>
+        <div class="tire" data-tire="front_right"><span class="tire-pos">Front R</span><span class="tire-value" data-tire-field="front_right">—</span></div>
+        <div class="tire" data-tire="rear_left"><span class="tire-pos">Rear L</span><span class="tire-value" data-tire-field="rear_left">—</span></div>
+        <div class="tire" data-tire="rear_right"><span class="tire-pos">Rear R</span><span class="tire-value" data-tire-field="rear_right">—</span></div>
       </div>
     </section>
 
@@ -143,6 +160,11 @@
       <h2 class="panel-title">Odometer history</h2>
       <div class="chart-wrap"><canvas id="chart-odometer"></canvas></div>
       <p class="chart-empty" id="empty-odometer" hidden>No history yet.</p>
+    </section>
+    <section class="panel">
+      <h2 class="panel-title">Daily distance</h2>
+      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
+      <p class="chart-empty" id="empty-daily" hidden>No history yet.</p>
     </section>
     <section class="panel">
       <h2 class="panel-title">Monthly distance</h2>

@@ -87,6 +87,55 @@
       paintDoor(k, doors[k]);
     });
     paintLights(l.headlights);
+
+    // tire pressure + active warnings
+    renderTires(l.tire_pressure_bar);
+    renderWarnings(l.warnings);
+  }
+
+  // ---- tire pressure (bar; missing -> "—") ----
+  var TIRE_POS = ["front_left", "front_right", "rear_left", "rear_right"];
+  function renderTires(tp) {
+    tp = tp || {};
+    TIRE_POS.forEach(function (key) {
+      var el = document.querySelector('[data-tire-field="' + key + '"]');
+      if (!el) return;
+      var v = tp[key];
+      el.textContent = (v === null || v === undefined) ? "—" : v;
+    });
+  }
+
+  // ---- active warnings (panel hidden unless something is strictly true) ----
+  var WARNING_DEFS = [
+    { key: "brake", label: "Brake", icon: "🛑" },
+    { key: "engine_oil", label: "Engine oil", icon: "🛢️" },
+    { key: "tire_pressure", label: "Tire pressure", icon: "🛞" },
+    { key: "mil", label: "Check engine", icon: "🔧" },
+    { key: "abs", label: "ABS", icon: "🅰️" },
+    { key: "airbag", label: "Airbag", icon: "💥" }
+  ];
+  function renderWarnings(warnings) {
+    var panel = document.getElementById("warnings-panel");
+    var container = document.getElementById("warnings");
+    if (!panel || !container) return;
+    warnings = warnings || {};
+    container.innerHTML = "";
+    var active = WARNING_DEFS.filter(function (d) { return warnings[d.key] === true; });
+    if (active.length === 0) { panel.hidden = true; return; }
+    active.forEach(function (d) {
+      var chip = document.createElement("div");
+      chip.className = "warning-chip";
+      var icon = document.createElement("span");
+      icon.className = "warning-icon";
+      icon.textContent = d.icon;
+      var label = document.createElement("span");
+      label.className = "warning-label";
+      label.textContent = d.label;
+      chip.appendChild(icon);
+      chip.appendChild(label);
+      container.appendChild(chip);
+    });
+    panel.hidden = false;
   }
 
   function rangeStr(km) {

@@ -3,7 +3,8 @@
 
 Logs into Mitsubishi Connect NA (Aeris ATSP), snapshots the vehicle state /
 health / mileage, appends the snapshot to an encrypted rolling history file,
-and writes it back so the static dashboard can decrypt + render it client-side.
+maintains hourly -> daily -> monthly -> yearly compounding rollups, and writes
+everything back so the static dashboard can decrypt + render it client-side.
 
 Run by .github/workflows/log-vehicle-status.yml every hour.
 
@@ -23,6 +24,22 @@ Crypto contract (must stay byte-identical to docs/crypto.js):
     docs/data/history.enc.json = {"iv_b64": "...", "ciphertext_b64": "<ct+tag>"}
     docs/data/meta.json        = {"schema_version":1,"salt_b64":"...",
                                   "iterations":210000,"hash":"SHA-256"}
+
+Plaintext document shape (single compounding file — see the storage schema
+design). All keys additive vs. the previous schema; the browser decrypter
+ignores unknown keys, so crypto.js is unchanged. app.js must be updated by the
+frontend agent to render the richer `hourly_history` entries and the new
+`rollups` object:
+    {
+      "generated_at": "...Z",
+      "vin": "...",
+      "vehicle": {...},
+      "latest": {<full hourly snapshot>},
+      "hourly_history": [<full snapshot>, ...],   # ~90d, time-pruned
+      "rollups": {"daily": [...], "monthly": [...], "yearly": [...]},
+      "monthly_distance": [{"period","distance_mi","duration_min",...}, ...],
+      "charging_history": [...]                    # optional
+    }
 """
 from __future__ import annotations
 
@@ -59,10 +76,20 @@ KDF_KEY_LEN = 32          # AES-256
 KDF_SALT_LEN = 16
 GCM_IV_LEN = 12
 
-HOURLY_LIMIT = 720        # ~30 days of hourly snapshots
+# Retention (per storage schema design). Hourly + daily are time-pruned so a
+# missed run never distorts the window; monthly + yearly are kept forever.
+HOURLY_RETENTION_DAYS = 90
+DAILY_RETENTION_DAYS = 730
 CHARGING_LOOKBACK_MONTHS = 6
 FIRST_MILEAGE_YEAR = 2024
 DEFAULT_TIMEZONE = "America/Halifax"
+
+KM_PER_MILE = 1.609344
+
+# Warning flags carried through every rollup tier.
+WARNING_KEYS = ("brake", "engine_oil", "tire_pressure", "mil", "abs", "airbag")
+# Tire position index (VHR tireStatus.tires[].position.value) -> canonical key.
+_TIRE_POS = {0: "front_left", 1: "front_right", 2: "rear_left", 3: "rear_right"}
 
 
 def _now_iso() -> str:
@@ -194,6 +221,11 @@ def _norm(text) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
+def _nums(values):
+    """Filter an iterable to real (non-bool) numbers."""
+    return [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
+
 def _charging_status(value) -> str:
     value = _scalar(value)
     if isinstance(value, bool):
@@ -286,9 +318,31 @@ def parse_headlights(state: dict) -> str:
     return _on_off(flat) if flat is not None else "off"
 
 
+def _latest_vhr_diagnostic(health: dict) -> dict:
+    """Return the newest VHR entry's diagnostic block (or {}).
+
+    Live VHR entries look like {"ts": ..., "dt": {"diagnostic": {...}}} — the
+    DFS below reaches `diagnostic` regardless of the exact nesting.
+    """
+    if not isinstance(health, dict):
+        return {}
+    vhr = health.get("vhr")
+    if isinstance(vhr, list) and vhr:
+        def _ts(e):
+            return e.get("ts", "") if isinstance(e, dict) else ""
+        newest = max(vhr, key=_ts)
+        diag = _find_key(newest, "diagnostic")
+        if isinstance(diag, dict):
+            return diag
+        return newest if isinstance(newest, dict) else {}
+    diag = _find_key(health, "diagnostic")
+    return diag if isinstance(diag, dict) else health
+
+
 def parse_warnings(health: dict) -> dict:
     """Best-effort VHR warning flags. Only *warning/alert/lamp* style keys are
-    consulted so a raw sensor reading can't masquerade as an active warning."""
+    consulted so a raw sensor reading can't masquerade as an active warning.
+    Absent keys default to False."""
     diag = _latest_vhr_diagnostic(health)
     return {
         "brake": _to_bool(_first_present(diag, [
@@ -306,24 +360,46 @@ def parse_warnings(health: dict) -> dict:
             "malfunctionIndicatorLamp", "milStatus", "mil",
             "checkEngineWarning", "checkEngine",
         ])),
+        "abs": _to_bool(_first_present(diag, [
+            "absWarning", "antiLockBrakeWarning", "absWarningLamp", "absAlert",
+        ])),
+        "airbag": _to_bool(_first_present(diag, [
+            "airbagWarning", "srsWarning", "airbagWarningLamp", "srsWarningLamp",
+        ])),
     }
 
 
-def _latest_vhr_diagnostic(health: dict) -> dict:
-    """Return the newest VHR entry's diagnostic block (or {})."""
-    if not isinstance(health, dict):
-        return {}
-    vhr = health.get("vhr")
-    if isinstance(vhr, list) and vhr:
-        def _ts(e):
-            return e.get("ts", "") if isinstance(e, dict) else ""
-        newest = max(vhr, key=_ts)
-        diag = _find_key(newest, "diagnostic")
-        if isinstance(diag, dict):
-            return diag
-        return newest if isinstance(newest, dict) else {}
-    diag = _find_key(health, "diagnostic")
-    return diag if isinstance(diag, dict) else health
+def parse_tires(health: dict) -> dict:
+    """VHR tireStatus.tires[] -> {front_left, front_right, rear_left, rear_right}
+    in bar (kPa / 100, 2dp). Mirrors the EU _parse_vsr precedent (api.py:744)."""
+    diag = _latest_vhr_diagnostic(health)
+    result = {"front_left": None, "front_right": None, "rear_left": None, "rear_right": None}
+    tire_status = _find_key(diag, "tireStatus")
+    tires = _find_key(tire_status, "tires") if isinstance(tire_status, dict) else None
+    if tires is None:
+        tires = _find_key(diag, "tires")
+    if not isinstance(tires, list):
+        return result
+    for tire in tires:
+        if not isinstance(tire, dict):
+            continue
+        pos = _to_int(_first_present(tire, ["position"]))
+        kpa = _to_float(_first_present(tire, [
+            "pressureValue", "pressure", "pressureKpa", "tirePressure",
+        ]))
+        key = _TIRE_POS.get(pos)
+        if key and kpa is not None:
+            result[key] = round(kpa / 100, 2)
+    return result
+
+
+def parse_firmware(health: dict):
+    """VHR firmware/software version string, else None."""
+    v = _scalar(_first_present(health, [
+        "firmwareVersion", "swVersion", "softwareVersion", "fwVersion",
+        "moduleFirmwareVersion",
+    ]))
+    return str(v) if v not in (None, "") else None
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +417,7 @@ def _extract_range(value):
 
 
 def build_latest(state: dict, health: dict, ts: str) -> dict:
+    """Full hourly snapshot (also stored verbatim in hourly_history)."""
     charging = _find_key(state, "chargingControl") or state
 
     battery = _to_int(_first_present(charging, ["hvBatteryLife"]), default=None)
@@ -380,20 +457,9 @@ def build_latest(state: dict, health: dict, ts: str) -> dict:
         },
         "doors": parse_doors(state),
         "headlights": parse_headlights(state),
+        "tire_pressure_bar": parse_tires(health),
         "warnings": parse_warnings(health),
-    }
-
-
-def compact_snapshot(latest: dict) -> dict:
-    """The trimmed shape stored in hourly_history (contract)."""
-    return {
-        "ts": latest["ts"],
-        "battery_pct": latest["battery_pct"],
-        "odometer_km": latest["odometer_km"],
-        "ev_range_km": latest["ev_range_km"],
-        "gas_range_km": latest["gas_range_km"],
-        "charging_status": latest["charging_status"],
-        "ignition_on": latest["ignition_on"],
+        "firmware_version": parse_firmware(health),
     }
 
 
@@ -417,7 +483,7 @@ def build_vehicle(vehicle: dict, details: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Mileage (monthly_distance) parsing
+# Mileage (monthly_distance) parsing — reliable all-time mileage-tracker source
 # ---------------------------------------------------------------------------
 _MONTHLY_LIST_KEYS = (
     "months", "monthly", "monthlyData", "monthlyMileage", "mileage",
@@ -451,7 +517,8 @@ def _find_monthly_list(obj):
 
 def extract_monthly(yearly: dict, year: int) -> list:
     """Best-effort: pull {period, distance_mi, duration_min} rows from a yearly
-    mileage response. Exact keys are unverified against a live response."""
+    mileage response, plus optional ev/gas split when the response carries it.
+    Exact keys are unverified against a live response."""
     rows = []
     entries = _find_monthly_list(yearly) or []
     for idx, entry in enumerate(entries, start=1):
@@ -468,13 +535,28 @@ def extract_monthly(yearly: dict, year: int) -> list:
             "durationMin", "duration_min", "duration", "minutes", "drivingTime",
             "durationMinutes", "totalTime", "time",
         ]))
+        # Optional EV/gas split (mileage tracker is described as an EV-vs-gas
+        # breakdown; exact field names unverified, so this is captured
+        # defensively and simply omitted when absent).
+        ev = _to_float(_first_present(entry, [
+            "evDistanceMi", "evDistance", "electricDistance", "evMiles", "ev",
+        ]))
+        gas = _to_float(_first_present(entry, [
+            "gasDistanceMi", "gasDistance", "fuelDistance", "iceDistance",
+            "gasMiles", "gas",
+        ]))
         if distance is None and duration is None:
             continue
-        rows.append({
+        row = {
             "period": f"{year}-{month:02d}",
             "distance_mi": round(distance, 2) if distance is not None else 0.0,
             "duration_min": duration if duration is not None else 0,
-        })
+        }
+        if ev is not None:
+            row["ev_distance_mi"] = round(ev, 2)
+        if gas is not None:
+            row["gas_distance_mi"] = round(gas, 2)
+        rows.append(row)
     return rows
 
 
@@ -499,6 +581,269 @@ def _recent_months(count: int):
         first = cursor.replace(day=1)
         cursor = first - timedelta(days=1)
     return seen
+
+
+# ---------------------------------------------------------------------------
+# Compounding rollups: hourly -> daily -> monthly -> yearly
+#
+# Every tier is a pure function of the tier below, keyed by date/period/year and
+# applied as an idempotent upsert. A missed run self-heals on the next run; a
+# persisted rollup outlives its pruned source (we only recompute a period whose
+# lower-tier source is still fully retained, otherwise we keep the frozen value).
+# ---------------------------------------------------------------------------
+def _empty_warnings() -> dict:
+    return {k: False for k in WARNING_KEYS}
+
+
+def _or_warnings(acc: dict, w) -> None:
+    if isinstance(w, dict):
+        for k in WARNING_KEYS:
+            if w.get(k):
+                acc[k] = True
+
+
+def _date_of(ts: str) -> str:
+    """UTC date 'YYYY-MM-DD' from a '...Z' timestamp (already UTC)."""
+    return ts[:10]
+
+
+def compute_daily_rollups(hourly: list) -> list:
+    """One rollup per UTC date present in `hourly`. Charging sessions are counted
+    as rising edges across the whole time-ordered stream, so an edge at the first
+    sample of a day (prior day ended not-charging) is credited to the new day."""
+    samples = sorted(
+        (s for s in hourly if isinstance(s, dict) and s.get("ts")),
+        key=lambda s: s["ts"],
+    )
+
+    # Rising charging edges, bucketed by the date of the edge sample.
+    edges_by_date: dict[str, int] = {}
+    prev_charging = False
+    for s in samples:
+        cur = s.get("charging_status") == "charging"
+        if cur and not prev_charging:
+            d = _date_of(s["ts"])
+            edges_by_date[d] = edges_by_date.get(d, 0) + 1
+        prev_charging = cur
+
+    by_date: dict[str, list] = {}
+    for s in samples:
+        by_date.setdefault(_date_of(s["ts"]), []).append(s)
+
+    return [
+        _daily_rollup(date, by_date[date], edges_by_date.get(date, 0))
+        for date in sorted(by_date)
+    ]
+
+
+def _daily_rollup(date: str, samples: list, charging_sessions: int) -> dict:
+    batt = _nums(s.get("battery_pct") for s in samples)
+    odo_start = next(
+        (s.get("odometer_km") for s in samples
+         if isinstance(s.get("odometer_km"), (int, float))), None,
+    )
+    odo_end = next(
+        (s.get("odometer_km") for s in reversed(samples)
+         if isinstance(s.get("odometer_km"), (int, float))), None,
+    )
+    distance = max(0, odo_end - odo_start) if (odo_start is not None and odo_end is not None) else 0
+
+    warnings_any = _empty_warnings()
+    plugged_any = False
+    tire_vals: list = []
+    firmware = None
+    for s in samples:
+        _or_warnings(warnings_any, s.get("warnings"))
+        if s.get("plugged_in"):
+            plugged_any = True
+        tp = s.get("tire_pressure_bar")
+        if isinstance(tp, dict):
+            tire_vals.extend(_nums(tp.values()))
+        fw = s.get("firmware_version")
+        if fw:
+            firmware = fw
+
+    batt_end = samples[-1].get("battery_pct") if samples else None
+    return {
+        "date": date,
+        "samples": len(samples),
+        "battery_pct": {
+            "min": min(batt) if batt else None,
+            "max": max(batt) if batt else None,
+            "end": batt_end,
+        },
+        "odometer_km": {"start": odo_start, "end": odo_end, "distance_km": distance},
+        "charging_sessions": charging_sessions,
+        "plugged_in_any": plugged_any,
+        "warnings_any": warnings_any,
+        "tire_pressure_bar": {
+            "min": round(min(tire_vals), 2) if tire_vals else None,
+            "max": round(max(tire_vals), 2) if tire_vals else None,
+        },
+        "firmware_version": firmware,
+    }
+
+
+def compute_monthly_rollups(daily: list, monthly_distance: list) -> list:
+    """One rollup per YYYY-MM present in `daily`, reconciled against the
+    mileage-tracker (monthly_distance) which wins whenever it has the period."""
+    mt = {
+        row["period"]: row
+        for row in (monthly_distance or [])
+        if isinstance(row, dict) and row.get("period")
+    }
+    by_month: dict[str, list] = {}
+    for d in daily:
+        by_month.setdefault(d["date"][:7], []).append(d)
+    return [
+        _monthly_rollup(period, sorted(by_month[period], key=lambda x: x["date"]), mt.get(period))
+        for period in sorted(by_month)
+    ]
+
+
+def _monthly_rollup(period: str, days: list, mt_row) -> dict:
+    odo_est = sum((d["odometer_km"].get("distance_km") or 0) for d in days)
+    odo_end = None
+    for d in days:  # days sorted ascending -> last non-null wins
+        end = d["odometer_km"].get("end")
+        if end is not None:
+            odo_end = end
+    batt_mins = _nums(d["battery_pct"]["min"] for d in days)
+    batt_maxs = _nums(d["battery_pct"]["max"] for d in days)
+    charging = sum(d.get("charging_sessions", 0) for d in days)
+    warnings_any = _empty_warnings()
+    for d in days:
+        _or_warnings(warnings_any, d.get("warnings_any"))
+
+    mt_mi = _to_float(mt_row.get("distance_mi")) if isinstance(mt_row, dict) else None
+    rollup = {"period": period, "days": len(days)}
+    if mt_mi is not None:
+        # Mileage tracker wins; odometer delta kept only as an estimate.
+        rollup["distance_km"] = round(mt_mi * KM_PER_MILE, 1)
+        rollup["distance_source"] = "mileage_tracker"
+    else:
+        rollup["distance_km"] = odo_est
+        rollup["distance_source"] = "odometer_delta"
+    rollup["distance_km_odo_est"] = odo_est
+    rollup["odometer_km_end"] = odo_end
+    rollup["battery_pct"] = {
+        "min": min(batt_mins) if batt_mins else None,
+        "max": max(batt_maxs) if batt_maxs else None,
+    }
+    rollup["charging_sessions"] = charging
+    rollup["warnings_any"] = warnings_any
+    # EV/gas split only from the mileage tracker (never derived from odometer).
+    if isinstance(mt_row, dict):
+        ev = _to_float(mt_row.get("ev_distance_mi"))
+        gas = _to_float(mt_row.get("gas_distance_mi"))
+        if ev is not None:
+            rollup["ev_distance_km"] = round(ev * KM_PER_MILE, 1)
+        if gas is not None:
+            rollup["gas_distance_km"] = round(gas * KM_PER_MILE, 1)
+    return rollup
+
+
+def compute_yearly_rollups(monthly: list) -> list:
+    by_year: dict[str, list] = {}
+    for m in monthly:
+        by_year.setdefault(m["period"][:4], []).append(m)
+    return [
+        _yearly_rollup(int(year), sorted(by_year[year], key=lambda x: x["period"]))
+        for year in sorted(by_year)
+    ]
+
+
+def _yearly_rollup(year: int, months: list) -> dict:
+    distance = round(sum((m.get("distance_km") or 0) for m in months), 1)
+    sources = {m.get("distance_source") for m in months if m.get("distance_source")}
+    if len(sources) == 1:
+        source = next(iter(sources))
+    elif sources:
+        source = "mixed"
+    else:
+        source = "odometer_delta"
+    odo_end = None
+    for m in months:  # sorted ascending by period
+        if m.get("odometer_km_end") is not None:
+            odo_end = m["odometer_km_end"]
+    charging = sum(m.get("charging_sessions", 0) for m in months)
+    batt_mins = _nums(m["battery_pct"]["min"] for m in months)
+    batt_maxs = _nums(m["battery_pct"]["max"] for m in months)
+    warnings_any = _empty_warnings()
+    for m in months:
+        _or_warnings(warnings_any, m.get("warnings_any"))
+    ev = _nums(m.get("ev_distance_km") for m in months)
+    gas = _nums(m.get("gas_distance_km") for m in months)
+
+    rollup = {
+        "year": year,
+        "distance_km": distance,
+        "distance_source": source,
+        "odometer_km_end": odo_end,
+        "charging_sessions": charging,
+        "battery_pct": {
+            "min": min(batt_mins) if batt_mins else None,
+            "max": max(batt_maxs) if batt_maxs else None,
+        },
+        "warnings_any": warnings_any,
+    }
+    if ev:
+        rollup["ev_distance_km"] = round(sum(ev), 1)
+    if gas:
+        rollup["gas_distance_km"] = round(sum(gas), 1)
+    return rollup
+
+
+def update_rollups(prior_rollups: dict, hourly: list, monthly_distance: list,
+                   now: datetime) -> dict:
+    """Idempotent hourly -> daily -> monthly -> yearly upsert + retention.
+
+    `hourly` must already be time-pruned to HOURLY_RETENTION_DAYS so the
+    completeness guards below line up with the actual retained samples.
+    """
+    prior_rollups = prior_rollups or {}
+    today_str = now.strftime("%Y-%m-%d")
+    hourly_cutoff = (now - timedelta(days=HOURLY_RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    daily_cutoff = (now - timedelta(days=DAILY_RETENTION_DAYS)).strftime("%Y-%m-%d")
+
+    daily_by_date = {
+        r["date"]: r for r in prior_rollups.get("daily", [])
+        if isinstance(r, dict) and r.get("date")
+    }
+    monthly_by_period = {
+        r["period"]: r for r in prior_rollups.get("monthly", [])
+        if isinstance(r, dict) and r.get("period")
+    }
+    yearly_by_year = {
+        r["year"]: r for r in prior_rollups.get("yearly", [])
+        if isinstance(r, dict) and "year" in r
+    }
+
+    # --- Daily: recompute complete (< today) & fully-retained days only. ---
+    for r in compute_daily_rollups(hourly):
+        d = r["date"]
+        if d >= today_str:
+            continue  # today is still accumulating
+        if f"{d}T00:00:00Z" < hourly_cutoff:
+            continue  # straddles the hourly-prune boundary -> keep frozen value
+        daily_by_date[d] = r
+    # Prune daily rollups to their retention window.
+    daily_by_date = {d: r for d, r in daily_by_date.items() if d >= daily_cutoff}
+    daily_list = [daily_by_date[d] for d in sorted(daily_by_date)]
+
+    # --- Monthly: recompute months whose daily source is fully retained. ---
+    for r in compute_monthly_rollups(daily_list, monthly_distance):
+        if f"{r['period']}-01" < daily_cutoff:
+            continue  # some days pruned -> keep the last full value
+        monthly_by_period[r["period"]] = r
+    monthly_list = [monthly_by_period[p] for p in sorted(monthly_by_period)]
+
+    # --- Yearly: recompute from monthly (monthly is kept forever). ---
+    for r in compute_yearly_rollups(monthly_list):
+        yearly_by_year[r["year"]] = r
+    yearly_list = [yearly_by_year[y] for y in sorted(yearly_by_year)]
+
+    return {"daily": daily_list, "monthly": monthly_list, "yearly": yearly_list}
 
 
 # ---------------------------------------------------------------------------
@@ -569,15 +914,26 @@ async def collect(client: MitsubishiNAClient, timezone_name: str) -> dict:
     }
 
 
-def assemble(prior: dict, collected: dict, generated_at: str) -> dict:
+def assemble(prior: dict, collected: dict, generated_at: str,
+             now: datetime | None = None) -> dict:
     prior = prior or {}
-    hourly = list(prior.get("hourly_history", []))
-    hourly.append(compact_snapshot(collected["latest"]))
-    hourly = hourly[-HOURLY_LIMIT:]
+    now = now or datetime.now(timezone.utc)
 
-    monthly = merge_monthly(
+    # Full snapshot is stored verbatim in hourly_history (== latest shape).
+    hourly = list(prior.get("hourly_history", []))
+    hourly.append(collected["latest"])
+    # Time-based pruning tolerates missed/delayed runs (a fixed count would not).
+    hourly_cutoff = (now - timedelta(days=HOURLY_RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hourly = [
+        s for s in hourly
+        if isinstance(s, dict) and s.get("ts", "") >= hourly_cutoff
+    ]
+
+    monthly_distance = merge_monthly(
         prior.get("monthly_distance", []), collected["monthly_rows"]
     )
+
+    rollups = update_rollups(prior.get("rollups", {}), hourly, monthly_distance, now)
 
     doc = {
         "generated_at": generated_at,
@@ -585,7 +941,8 @@ def assemble(prior: dict, collected: dict, generated_at: str) -> dict:
         "vehicle": collected["vehicle"],
         "latest": collected["latest"],
         "hourly_history": hourly,
-        "monthly_distance": monthly,
+        "rollups": rollups,
+        "monthly_distance": monthly_distance,
     }
     # Additive, contract-compatible: the browser decrypter ignores unknown keys.
     if collected["charging_rows"]:
@@ -631,11 +988,15 @@ async def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_FILE.write_text(json.dumps(encrypt(key, plaintext), indent=2) + "\n")
 
+    rollups = doc["rollups"]
     print(
         f"Logged {doc['vin']} @ {doc['generated_at']}: "
         f"battery={doc['latest']['battery_pct']}% "
         f"odo={doc['latest']['odometer_km']} "
         f"hourly={len(doc['hourly_history'])} "
+        f"daily={len(rollups['daily'])} "
+        f"monthly={len(rollups['monthly'])} "
+        f"yearly={len(rollups['yearly'])} "
         f"months={len(doc['monthly_distance'])}"
     )
 

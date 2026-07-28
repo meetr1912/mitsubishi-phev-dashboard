@@ -262,6 +262,49 @@ button {
 }
 .door[data-door="headlights"].open .door-state { color: var(--warn); }
 
+/* ============================= TIRE PRESSURE ============================= */
+.panel-unit { color: var(--text-dim); font-weight: 400; font-size: 0.8rem; }
+.tires {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6rem;
+}
+@media (max-width: 360px) { .tires { grid-template-columns: repeat(2, 1fr); } }
+.tire {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.7rem 0.3rem;
+  border-radius: 10px;
+  background: var(--bg-tile);
+  border: 1px solid var(--border);
+  text-align: center;
+}
+.tire-pos { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; }
+.tire-value { font-size: 1.05rem; font-weight: 700; }
+
+/* ============================= WARNINGS ============================= */
+.panel-warn {
+  border-color: var(--danger);
+  background: rgba(229, 72, 77, 0.09);
+}
+.panel-warn .panel-title { color: var(--danger); }
+.warnings { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.warning-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(229, 72, 77, 0.16);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.warning-icon { font-size: 1rem; line-height: 1; }
+
 /* ============================= COMMANDS ============================= */
 .commands {
   display: grid;

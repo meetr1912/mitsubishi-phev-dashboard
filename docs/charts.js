@@ -6,7 +6,7 @@
 (function () {
   "use strict";
 
-  var charts = { battery: null, odometer: null, monthly: null };
+  var charts = { battery: null, odometer: null, daily: null, monthly: null };
 
   var COLORS = {
     accent: "#3ecf8e",
@@ -109,28 +109,72 @@
     });
   }
 
-  function renderMonthly(months) {
-    var has = months && months.length > 0;
+  // Daily distance-driven bar chart from the new daily rollup
+  // (rollups.daily[].odometer_km.distance_km). Defensive: missing -> null bar.
+  function renderDaily(days) {
+    var has = days && days.length > 0;
+    toggleEmpty("empty-daily", !has);
+    var canvas = document.getElementById("chart-daily");
+    if (!canvas) return;
+    destroy("daily");
+    if (!has) return;
+    var labels = days.map(function (d) { return d.date; });
+    var data = days.map(function (d) {
+      var o = d.odometer_km;
+      return (o && typeof o === "object" && o.distance_km != null) ? o.distance_km : null;
+    });
+    charts.daily = new Chart(canvas.getContext("2d"), {
+      type: "bar",
+      data: {
+        labels: labels,
+        datasets: [{
+          label: "Distance (km)",
+          data: data,
+          backgroundColor: "rgba(91,140,255,0.55)",
+          borderColor: COLORS.accent2,
+          borderWidth: 1, borderRadius: 4
+        }]
+      },
+      options: baseOpts("km")
+    });
+  }
+
+  // Monthly bar chart. Prefer the compounding schema's rollups.monthly
+  // (distance_km); fall back to the legacy monthly_distance (distance_mi).
+  function renderMonthly(data) {
+    var rollup = data.rollups && Array.isArray(data.rollups.monthly) ? data.rollups.monthly : null;
+    var legacy = Array.isArray(data.monthly_distance) ? data.monthly_distance : null;
+    var months, valueOf, unit;
+    if (rollup && rollup.length > 0) {
+      months = rollup;
+      valueOf = function (m) { return m.distance_km != null ? m.distance_km : null; };
+      unit = "km";
+    } else {
+      months = legacy || [];
+      valueOf = function (m) { return m.distance_mi != null ? m.distance_mi : null; };
+      unit = "mi";
+    }
+    var has = months.length > 0;
     toggleEmpty("empty-monthly", !has);
     var canvas = document.getElementById("chart-monthly");
     if (!canvas) return;
     destroy("monthly");
     if (!has) return;
     var labels = months.map(function (m) { return m.period; });
-    var data = months.map(function (m) { return m.distance_mi; });
+    var series = months.map(valueOf);
     charts.monthly = new Chart(canvas.getContext("2d"), {
       type: "bar",
       data: {
         labels: labels,
         datasets: [{
-          label: "Distance (mi)",
-          data: data,
+          label: "Distance (" + unit + ")",
+          data: series,
           backgroundColor: "rgba(62,207,142,0.55)",
           borderColor: COLORS.accent,
           borderWidth: 1, borderRadius: 4
         }]
       },
-      options: baseOpts("mi")
+      options: baseOpts(unit)
     });
   }
 
@@ -143,7 +187,8 @@
     if (!data) return;
     renderBattery(data.hourly_history || []);
     renderOdometer(data.hourly_history || []);
-    renderMonthly(data.monthly_distance || []);
+    renderDaily((data.rollups && data.rollups.daily) || []);
+    renderMonthly(data);
   }
 
   window.PHEV.onData(renderAll);
