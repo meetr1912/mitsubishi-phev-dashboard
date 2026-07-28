@@ -207,7 +207,11 @@ async function computePinHash(pin: string, clientNonceBytes: Uint8Array, serverN
  * distinguishes them, this is where it would break.
  */
 async function verifyPin(env: Env, accessToken: string, vin: string): Promise<string> {
-  const clientNonceBytes = randomBytes(16);
+  // Matches the proven-working EU reference client (secrets.token_bytes(32)) —
+  // a 16-byte nonce was accepted by /remoteOperation (step 1) but broke the
+  // server-side hash generation in /remoteOperation/pin (step 2, HTTP 500
+  // "Error while generating client Auth Hash Token request").
+  const clientNonceBytes = randomBytes(32);
   const clientNonceB64 = bytesToB64(clientNonceBytes);
 
   // Step 1: request a server nonce.
