@@ -129,7 +129,13 @@ class MqttReader {
   }
 
   async readPacket(timeoutMs: number): Promise<MqttPacket> {
-    const deadline = Date.now() + timeoutMs;
+    return this.readPacketByDeadline(Date.now() + timeoutMs);
+  }
+
+  /** Same as readPacket, but shares one deadline across a caller's retry loop
+   * instead of resetting the clock on every call (a single slow-arriving
+   * packet shouldn't burn the caller's entire per-attempt budget). */
+  async readPacketByDeadline(deadline: number): Promise<MqttPacket> {
     for (;;) {
       const parsed = this.tryParse();
       if (parsed) return parsed;
@@ -214,17 +220,20 @@ export async function mqttDiscoverOperations(opts: {
     await writer.write(buildPublish(requestTopic, new TextEncoder().encode(requestBody), 0));
 
     // 4. Wait for the response PUBLISH (ignore stray PINGRESP/etc while waiting).
+    // Shared 75s deadline across all attempts — matches the real app's own patience
+    // for remote-operation responses (RemoteOperation.java default timeout: 90000ms).
     stage = "awaiting_registration_response";
+    const registrationDeadline = Date.now() + 75000;
     let responsePacket: MqttPacket | null = null;
-    for (let attempts = 0; attempts < 8; attempts++) {
-      const pkt = await reader.readPacket(20000);
+    while (Date.now() < registrationDeadline) {
+      const pkt = await reader.readPacketByDeadline(registrationDeadline);
       if (pkt.type === PACKET_PUBLISH) {
         responsePacket = pkt;
         break;
       }
-      if (pkt.type === PACKET_PINGRESP) continue;
+      // ignore stray PINGRESP/etc and keep waiting on the shared deadline
     }
-    if (!responsePacket) throw new Error("No registration response received within timeout");
+    if (!responsePacket) throw new Error("No registration response received within 75s");
     stage = "registration_response_received";
 
     // PUBLISH variable header (QoS0): 2-byte topic length + topic bytes, then payload.
