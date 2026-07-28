@@ -235,10 +235,27 @@
     return false;
   }
 
+  function flashConfirmed(btn) {
+    btn.classList.add("confirmed");
+    clearTimeout(btn._confirmTimer);
+    btn._confirmTimer = setTimeout(function () {
+      btn.classList.remove("confirmed");
+    }, 2500);
+  }
+
   async function sendCommand(action, btn) {
     setBtnBusy(btn, true, "loading");
     try {
-      reportCommand(action, await postCommand(action));
+      var confirmed = reportCommand(action, await postCommand(action));
+      if (confirmed) {
+        flashConfirmed(btn);
+        // Poll said Successful, but that's the vehicle ACK, not necessarily
+        // the sensor state yet — pull real status so doors/lights/lock
+        // reflect the change instead of staying on whatever was last fetched.
+        // Reuses the same quiet (no toast, no error surfacing) refresh used
+        // right after unlock.
+        autoRefreshOnUnlock();
+      }
     } catch (e) {
       toast("Network error: " + e.message, "error");
     } finally {

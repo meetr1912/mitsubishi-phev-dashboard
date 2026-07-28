@@ -594,6 +594,14 @@ button {
 .cmd-btn:active { transform: scale(0.95); }
 .cmd-btn:disabled { opacity: 0.35; }
 .cmd-btn.loading { color: var(--accent); }
+/* Held for a couple seconds after a confirmed (poll -> Successful) response,
+   as a persistent cue alongside the toast — the toast alone is easy to miss. */
+.cmd-btn.confirmed {
+  border-color: var(--success);
+  color: var(--success);
+  box-shadow: 0 0 0 1px var(--success), 0 0 16px var(--accent-glow);
+}
+.cmd-btn.confirmed svg { color: var(--success); }
 .spinner {
   width: 14px; height: 14px;
   border: 2px solid rgba(255,255,255,0.15);
