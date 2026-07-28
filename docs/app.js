@@ -103,6 +103,9 @@
       // Independent of the status fetch: widens the temperature stepper to
       // whatever this vehicle actually supports.
       loadTempRange();
+      // Prefills the charging-schedule editor with whatever is already
+      // configured on the vehicle, so Save doesn't silently overwrite it.
+      loadChargingSchedule();
     }
   }
 
@@ -540,6 +543,125 @@
     } finally {
       showUpdating(false);
     }
+  }
+
+  // ---- charging schedule (operation "chargingControl2") ----
+  // The vehicle always holds exactly 3 timer slots ("Timer 1/2/3"); an
+  // unconfigured slot is saved disabled, not omitted. chargingId is generated
+  // by the WORKER (not the vehicle) the first time a slot is saved, so it can
+  // only be learned by reading it back — either from a prior load, or from the
+  // save response, which echoes exactly what it sent. Losing track of an id
+  // would make the next save create a fresh duplicate timer instead of editing
+  // the one before it, so every successful save re-populates from the echo.
+  var CHARGE_DAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  var schedulePanel = document.getElementById("charging-schedule-panel");
+  var scheduleStatusEl = document.getElementById("schedule-status");
+  var scheduleSaveBtn = document.getElementById("schedule-save");
+  var timerCards = schedulePanel ? schedulePanel.querySelectorAll(".charge-timer") : [];
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+  function minutesToTimeStr(mins) {
+    mins = ((mins % 1440) + 1440) % 1440;
+    return pad2(Math.floor(mins / 60)) + ":" + pad2(mins % 60);
+  }
+  function timeStrToMinutes(str) {
+    var parts = String(str || "0:0").split(":");
+    var h = parseInt(parts[0], 10) || 0;
+    var m = parseInt(parts[1], 10) || 0;
+    return h * 60 + m;
+  }
+
+  function populateTimerCard(card, timer) {
+    timer = timer || { id: null, enabled: false, startMinutes: 0, endMinutes: 360, days: [] };
+    card.dataset.chargingId = timer.id || "";
+    var enable = card.querySelector(".charge-timer-enable");
+    if (enable) enable.checked = !!timer.enabled;
+    var start = card.querySelector(".charge-timer-start");
+    if (start) start.value = minutesToTimeStr(timer.startMinutes || 0);
+    var end = card.querySelector(".charge-timer-end");
+    if (end) end.value = minutesToTimeStr(timer.endMinutes || 0);
+    var days = timer.days || [];
+    Array.prototype.forEach.call(card.querySelectorAll(".charge-day-btn"), function (btn) {
+      btn.classList.toggle("active", days.indexOf(btn.dataset.day) !== -1);
+    });
+  }
+
+  function readTimerCard(card) {
+    var enable = card.querySelector(".charge-timer-enable");
+    var start = card.querySelector(".charge-timer-start");
+    var end = card.querySelector(".charge-timer-end");
+    var days = [];
+    Array.prototype.forEach.call(card.querySelectorAll(".charge-day-btn.active"), function (btn) {
+      days.push(btn.dataset.day);
+    });
+    return {
+      id: card.dataset.chargingId || null,
+      enabled: !!(enable && enable.checked),
+      startMinutes: timeStrToMinutes(start && start.value),
+      endMinutes: timeStrToMinutes(end && end.value),
+      days: days
+    };
+  }
+
+  // Best-effort, silent: this backs a background prefill, not a user action.
+  // Leaves the default (all disabled, 00:00-06:00) in place on any failure.
+  async function loadChargingSchedule() {
+    if (!schedulePanel) return;
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) return;
+    try {
+      var res = await fetch(CONFIG.WORKER_URL + "/settings?operation=chargingControl2", {
+        headers: { "X-Dashboard-Key": key }
+      });
+      if (!res.ok) { if (scheduleStatusEl) scheduleStatusEl.textContent = "Could not load current schedule."; return; }
+      var body = await res.json();
+      var schedule = (body && body.schedule) || [];
+      for (var i = 0; i < timerCards.length; i++) populateTimerCard(timerCards[i], schedule[i]);
+      if (scheduleStatusEl) {
+        scheduleStatusEl.textContent = schedule.length
+          ? "Loaded from vehicle."
+          : "No schedule on file yet — configure below and save.";
+      }
+    } catch (e) {
+      if (scheduleStatusEl) scheduleStatusEl.textContent = "Could not load current schedule.";
+    }
+  }
+
+  async function saveSchedule() {
+    if (!scheduleSaveBtn || scheduleSaveBtn.disabled) return;
+    var timers = [];
+    for (var i = 0; i < timerCards.length; i++) timers.push(readTimerCard(timerCards[i]));
+
+    scheduleSaveBtn.disabled = true;
+    scheduleSaveBtn.classList.add("sending");
+    if (scheduleStatusEl) scheduleStatusEl.textContent = "Saving…";
+    try {
+      var result = await postCommandBody({ action: "charging_schedule", timers: timers });
+      if (reportCommand("charging_schedule", result)) {
+        // Re-populate from the echo so the ids we just learned are used on the
+        // NEXT save instead of being treated as new timers again.
+        var echoed = (result.body && result.body.timers) || [];
+        for (var j = 0; j < timerCards.length; j++) populateTimerCard(timerCards[j], echoed[j]);
+        if (scheduleStatusEl) scheduleStatusEl.textContent = "Saved.";
+      } else if (scheduleStatusEl) {
+        scheduleStatusEl.textContent = "Save failed — see the message above.";
+      }
+    } catch (e) {
+      toast("Network error: " + e.message, "error");
+      if (scheduleStatusEl) scheduleStatusEl.textContent = "Save failed.";
+    } finally {
+      scheduleSaveBtn.classList.remove("sending");
+      scheduleSaveBtn.disabled = false;
+    }
+  }
+
+  if (schedulePanel) {
+    schedulePanel.addEventListener("click", function (e) {
+      var day = e.target.closest(".charge-day-btn");
+      if (day) { day.classList.toggle("active"); return; }
+      var save = e.target.closest("#schedule-save");
+      if (save) { saveSchedule(); return; }
+    });
   }
 
   // ---- wire up ----

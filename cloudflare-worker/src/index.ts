@@ -670,6 +670,119 @@ async function runChargingControl(
 }
 
 /**
+ * Recurring weekly charge schedule — operation "chargingControl2"
+ * (= RemoteChargingControlScheduler). Unlike chargingControl/chargingControlStop
+ * above, this is NOT routed to the DGE microservice: it falls through to the
+ * same immediate /avi/v3/remoteOperation "PerformRO" path as remoteAC, with
+ * dataKey "data" (Utility.getDataKeyForVehicleOperation's switch map assigns
+ * "data" to this operation specifically). It therefore reuses runCommand()
+ * (login -> PIN-verify -> submit -> poll) rather than the pin-less
+ * runChargingControl() used for immediate start/stop.
+ *
+ * The app ALWAYS sends exactly three timer slots ("Timer 1/2/3"), even ones
+ * the user has not configured — an inactive slot is chargingStatus:0, not an
+ * absent array entry. This mirrors that shape rather than a variable-length
+ * list, so a write can never accidentally drop an existing timer the caller
+ * didn't mean to touch.
+ *
+ * [UNVERIFIED] Never sent to a live vehicle. In particular chargingAction
+ * (0 = fresh save, 1 = edit-existing, per the app's own mapper) is asserted
+ * from source but not confirmed against what the server actually requires;
+ * this mirrors the app's logic (existing chargingId -> edit, none -> fresh)
+ * rather than guessing an alternative.
+ */
+const CHARGING_MAX_TIMERS = 3;
+const CHARGING_DAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+const CHARGING_DAY_FIELDS: Record<(typeof CHARGING_DAY_ORDER)[number], string> = {
+  Mon: "everyMonday", Tue: "everyTuesday", Wed: "everyWednesday", Thu: "everyThursday",
+  Fri: "everyFriday", Sat: "everySaturday", Sun: "everySunday",
+};
+
+export interface ChargeTimerInput {
+  id: string | null; // existing chargingId to edit, or null for a fresh timer
+  enabled: boolean;
+  startMinutes: number; // minutes since local midnight, 0..1439
+  endMinutes: number;
+  days: string[]; // subset of CHARGING_DAY_ORDER
+}
+
+function randomHexId(): string {
+  const bytes = randomBytes(4);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+function clampMinutesOfDay(n: number): number {
+  return Math.max(0, Math.min(1439, Math.round(n)));
+}
+
+function buildChargingScheduleExtra(timers: ChargeTimerInput[]): Record<string, unknown> {
+  const chargingDefinition: Record<string, unknown>[] = [];
+  for (let i = 0; i < CHARGING_MAX_TIMERS; i++) {
+    const t: ChargeTimerInput | undefined = timers[i];
+    const dayFlags: Record<string, number> = {};
+    for (const day of CHARGING_DAY_ORDER) dayFlags[CHARGING_DAY_FIELDS[day]] = 0;
+    if (t) {
+      for (const d of t.days) {
+        if (Object.prototype.hasOwnProperty.call(CHARGING_DAY_FIELDS, d)) {
+          dayFlags[CHARGING_DAY_FIELDS[d as (typeof CHARGING_DAY_ORDER)[number]]] = 1;
+        }
+      }
+    }
+    chargingDefinition.push({
+      chargingStatus: t?.enabled ? 1 : 0,
+      chargingAction: t?.id ? 1 : 0,
+      chargingId: t?.id || randomHexId(),
+      chargingName: `Timer ${i + 1}`,
+      schedule: {
+        serviceScheduleType: 1,
+        startTimeOfDay: t ? clampMinutesOfDay(t.startMinutes) * 60 : 0,
+        endTimeOfDay: t ? clampMinutesOfDay(t.endMinutes) * 60 : 0,
+        ...dayFlags,
+      },
+      hvacSettings: null,
+    });
+  }
+  return { data: { eventTimestamp: isoEventTimestamp(), chargingDefinition } };
+}
+
+/**
+ * Normalise a chargingControl2 read (or write echo) into the shape the
+ * dashboard renders. Read-only, best-effort: an unrecognised shape degrades to
+ * an empty timer list rather than throwing, since this backs a GET.
+ */
+export interface ChargeTimerSummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+  startMinutes: number;
+  endMinutes: number;
+  days: string[];
+}
+
+function parseChargingSchedule(raw: JsonValue): ChargeTimerSummary[] {
+  const list = findKey(raw, "chargingDefinition");
+  if (!Array.isArray(list)) return [];
+  const out: ChargeTimerSummary[] = [];
+  for (const entry of list) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const schedule = entry.schedule;
+    const sch = schedule !== null && typeof schedule === "object" && !Array.isArray(schedule) ? schedule : {};
+    const days = CHARGING_DAY_ORDER.filter((d) => toInt(sch[CHARGING_DAY_FIELDS[d]]) === 1);
+    const startSec = toInt(sch.startTimeOfDay, 0) ?? 0;
+    const endSec = toInt(sch.endTimeOfDay, 0) ?? 0;
+    out.push({
+      id: String(scalar(entry.chargingId) ?? ""),
+      name: String(scalar(entry.chargingName) ?? ""),
+      enabled: toInt(entry.chargingStatus, 0) === 1,
+      startMinutes: Math.round(startSec / 60),
+      endMinutes: Math.round(endSec / 60),
+      days,
+    });
+  }
+  return out;
+}
+
+/**
  * Fetch this vehicle's climate posmap from the model configuration endpoint.
  *
  * Path from res/raw/environment (getmodelconfigurations.path); the response
@@ -1152,7 +1265,11 @@ export default {
         if (!res.ok) {
           return json({ success: false, error: `Settings read failed: HTTP ${res.status} ${await safeText(res)}` }, 502);
         }
-        return json({ success: true, operation, settings: await res.json() });
+        const settings = (await res.json()) as JsonValue;
+        // Normalised alongside the raw payload so the frontend doesn't have to
+        // duplicate the chargingDefinition parsing logic in browser JS.
+        const schedule = operation === "chargingControl2" ? parseChargingSchedule(settings) : undefined;
+        return json({ success: true, operation, settings, schedule });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -1224,17 +1341,20 @@ export default {
     let rawMinutes: unknown;
     let rawTemp: unknown;
     let rawOptions: unknown;
+    let rawTimers: unknown;
     try {
       const body = (await request.json()) as {
         action?: unknown;
         minutes?: unknown;
         temperatureC?: unknown;
         options?: unknown;
+        timers?: unknown;
       };
       action = body.action;
       rawMinutes = body.minutes;
       rawTemp = body.temperatureC;
       rawOptions = body.options;
+      rawTimers = body.timers;
     } catch {
       return json({ success: false, error: "Invalid JSON body" }, 400);
     }
@@ -1259,6 +1379,68 @@ export default {
               ? `'${action}' rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
               : `'${action}' sent, but the vehicle did not report back in time.`;
         return json({ success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    // --- Recurring charge schedule. Uses the standard runCommand() envelope
+    // (login -> PIN-verify -> submit -> poll) with operation "chargingControl2",
+    // NOT runChargingControl() — this operation shares remoteAC's endpoint and
+    // builder, not the DGE microservice used by charge_start/charge_stop.
+    if (action === "charging_schedule") {
+      const items = Array.isArray(rawTimers) ? rawTimers : [];
+      if (items.length > CHARGING_MAX_TIMERS) {
+        return json({ success: false, error: `At most ${CHARGING_MAX_TIMERS} timers are supported` }, 400);
+      }
+      const timers: ChargeTimerInput[] = [];
+      for (const raw of items) {
+        if (raw === null || typeof raw !== "object") {
+          return json({ success: false, error: "Each timer must be an object" }, 400);
+        }
+        const item = raw as Record<string, unknown>;
+        const startMinutes = typeof item.startMinutes === "number" ? item.startMinutes : NaN;
+        const endMinutes = typeof item.endMinutes === "number" ? item.endMinutes : NaN;
+        if (!Number.isFinite(startMinutes) || !Number.isFinite(endMinutes)) {
+          return json({ success: false, error: "Each timer needs numeric startMinutes/endMinutes" }, 400);
+        }
+        const days = Array.isArray(item.days) ? item.days.filter((d): d is string => typeof d === "string") : [];
+        const unknownDay = days.find((d) => !CHARGING_DAY_ORDER.includes(d as (typeof CHARGING_DAY_ORDER)[number]));
+        if (unknownDay) {
+          return json({ success: false, error: `Unknown day '${unknownDay}'` }, 400);
+        }
+        timers.push({
+          id: typeof item.id === "string" && item.id ? item.id : null,
+          enabled: item.enabled === true,
+          startMinutes: clampMinutesOfDay(startMinutes),
+          endMinutes: clampMinutesOfDay(endMinutes),
+          days,
+        });
+      }
+
+      try {
+        const extra = buildChargingScheduleExtra(timers);
+        // chargingId is generated HERE, client-side of the vehicle API (by us),
+        // not assigned by the server — so it is only knowable by echoing back
+        // exactly what was built. Without this the dashboard would send id:null
+        // for a "new" timer on every save, creating a fresh timer each time
+        // instead of ever editing the one before it.
+        const sentTimers = parseChargingSchedule(extra as JsonValue);
+        const { eventId, submitted, event } = await runCommand(env, "chargingControl2", extra);
+        if (!event) {
+          return json({ success: true, action, message: "Charging schedule submitted.", eventId, raw: submitted, timers: sentTimers });
+        }
+        const message =
+          event.outcome === "succeeded"
+            ? "Charging schedule saved, confirmed by vehicle."
+            : event.outcome === "failed"
+              ? `Charging schedule rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
+              : "Charging schedule sent, but the vehicle did not report back in time.";
+        return json({
+          success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event,
+          timers: sentTimers,
+        });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);

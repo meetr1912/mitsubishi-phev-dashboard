@@ -420,6 +420,89 @@
         <button class="cmd-btn" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg> Stop charge</button>
       </div>
     </section>
+
+    <!-- Charging schedule (operation "chargingControl2") — the vehicle always
+         holds exactly 3 timer slots, so this always shows 3, not an "add
+         timer" list. An unchecked timer is saved disabled, not omitted.
+         Loaded from the vehicle on tab load; nothing is sent until Save. -->
+    <section class="panel" id="charging-schedule-panel">
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-bolt" /></svg>
+        Charging schedule
+      </h2>
+      <p class="schedule-hint" id="schedule-status">Loading current schedule…</p>
+
+      <div class="charge-timer" data-timer="0">
+        <div class="charge-timer-head">
+          <label class="charge-enable">
+            <input type="checkbox" class="charge-timer-enable" />
+            <span>Timer 1</span>
+          </label>
+        </div>
+        <div class="charge-time-row">
+          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
+          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
+        </div>
+        <div class="charge-days" role="group" aria-label="Timer 1 days">
+          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
+          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
+          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
+          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
+          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
+          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
+          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
+        </div>
+      </div>
+
+      <div class="charge-timer" data-timer="1">
+        <div class="charge-timer-head">
+          <label class="charge-enable">
+            <input type="checkbox" class="charge-timer-enable" />
+            <span>Timer 2</span>
+          </label>
+        </div>
+        <div class="charge-time-row">
+          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
+          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
+        </div>
+        <div class="charge-days" role="group" aria-label="Timer 2 days">
+          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
+          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
+          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
+          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
+          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
+          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
+          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
+        </div>
+      </div>
+
+      <div class="charge-timer" data-timer="2">
+        <div class="charge-timer-head">
+          <label class="charge-enable">
+            <input type="checkbox" class="charge-timer-enable" />
+            <span>Timer 3</span>
+          </label>
+        </div>
+        <div class="charge-time-row">
+          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
+          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
+        </div>
+        <div class="charge-days" role="group" aria-label="Timer 3 days">
+          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
+          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
+          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
+          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
+          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
+          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
+          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
+        </div>
+      </div>
+
+      <button type="button" class="climate-master" id="schedule-save">
+        <svg aria-hidden="true"><use href="#icon-bolt" /></svg>
+        <span>Save schedule</span>
+      </button>
+    </section>
     </div>
 
     <!-- =============== HISTORY TAB =============== -->

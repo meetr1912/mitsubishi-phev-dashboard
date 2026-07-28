@@ -604,6 +604,65 @@ button {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ============================= CHARGING SCHEDULE ============================= */
+.schedule-hint { color: var(--text-dim); font-size: 0.78rem; margin: -0.3rem 0 0.9rem; }
+.charge-timer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.8rem;
+  margin-bottom: 0.6rem;
+  background: rgba(255,255,255,0.02);
+}
+.charge-timer-head { margin-bottom: 0.55rem; }
+.charge-enable {
+  display: flex; align-items: center; gap: 0.5rem;
+  font-family: var(--font-display); font-weight: 600; font-size: 0.95rem;
+  color: var(--text-mid);
+  cursor: pointer;
+  min-height: 44px;
+}
+/* native checkbox, just large enough to be a real touch target */
+.charge-enable input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); flex-shrink: 0; }
+.charge-enable:has(input:checked) span { color: var(--accent-soft); }
+
+.charge-time-row {
+  display: flex; gap: 0.8rem; margin-bottom: 0.6rem;
+}
+.charge-time-row label {
+  display: flex; flex-direction: column; gap: 0.25rem;
+  font-size: 0.72rem; color: var(--text-dim);
+  flex: 1;
+}
+.charge-time-row input[type="time"] {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-hi);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  padding: 0.5rem 0.6rem;
+  min-height: 40px;
+  color-scheme: dark;
+}
+
+.charge-days { display: flex; gap: 0.35rem; }
+.charge-day-btn {
+  flex: 1;
+  min-height: 40px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  transition: all 0.15s;
+}
+.charge-day-btn.active {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent-soft);
+}
+
 /* ============================= CHARTS ============================= */
 .chart-wrap { position: relative; height: 180px; }
 .chart-empty { color: var(--text-dim); font-size: 0.8rem; margin: 0.4rem 0 0; }
