@@ -258,7 +258,7 @@
   // Until Start is pressed (or after any later change) the selection is *pending*
   // (armed, outlined); only a confirmed start reads as *running* (filled + glow).
   var VALID_OPTIONS = ["seat_fl", "seat_fr", "seat_rl", "seat_rr",
-                       "steering_heat", "defrost_front", "defrost_rear"];
+                       "steering_heat", "defrost_front", "defrost_rear", "max_defrost"];
   // Read off this vehicle's own posmap via GET /config (2025 DGE, Outlander
   // Electric): 18.0–32.0 °C in 0.5 steps, plus LO and HI endpoints. The range
   // is a property of the car, so /config is also queried at unlock to pick up
@@ -272,6 +272,7 @@
 
   var climatePanel = document.getElementById("climate-panel");
   var climateStartBtn = document.getElementById("climate-start");
+  var climateStopBtn = document.getElementById("climate-stop");
   var tempValueEl = document.getElementById("temp-value");
 
   function comfortButtons() {
@@ -334,6 +335,7 @@
       climateStartBtn.classList.remove("running");
       clearTimeout(climateStartBtn._runTimer);
     }
+    if (climateStopBtn) climateStopBtn.hidden = true;
     Array.prototype.forEach.call(comfortButtons(), function (b) {
       clearTimeout(b._runTimer);
       b.classList.remove("running");
@@ -341,6 +343,27 @@
       if (selectedOptions[b.dataset.option]) b.classList.add("armed");
     });
     startLabel("Start climate");
+  }
+
+  // Stop is a SEPARATE remote operation ("engineOff"), not "re-send climate
+  // with everything off" — the car is asked to end the whole session. On
+  // success this clears the running state immediately rather than waiting out
+  // the original duration timer, since the car has confirmed it is already off.
+  async function stopClimate() {
+    if (!climateStopBtn || climateStopBtn.disabled) return;
+    climateStopBtn.disabled = true;
+    climateStopBtn.classList.add("sending");
+    try {
+      var result = await postCommand("climate_stop");
+      if (reportCommand("climate_stop", result)) {
+        markPending();
+      }
+    } catch (e) {
+      toast("Network error: " + e.message, "error");
+    } finally {
+      climateStopBtn.classList.remove("sending");
+      climateStopBtn.disabled = false;
+    }
   }
 
   function toggleOption(btn) {
@@ -400,6 +423,7 @@
       if (reportCommand("climate", result)) {
         climateRunning = true;
         climateStartBtn.classList.add("running");
+        if (climateStopBtn) climateStopBtn.hidden = false;
         startLabel("Climate running");
         clearTimeout(climateStartBtn._runTimer);
         climateStartBtn._runTimer = setTimeout(function () {
@@ -433,6 +457,8 @@
       if (temp) { stepTemp(parseInt(temp.dataset.tempStep, 10) || 0); return; }
       var start = e.target.closest(".climate-master");
       if (start) { startClimate(); return; }
+      var stop = e.target.closest(".climate-stop");
+      if (stop) { stopClimate(); return; }
     });
   }
   renderTemp();

@@ -417,6 +417,33 @@ button {
   color: var(--accent-soft);
 }
 
+/* Stop is a distinct action (operation "engineOff"), not a re-send of Start
+   with everything off — kept visually separate (danger-toned, not ember/teal)
+   so it never reads as just another comfort option. */
+.climate-stop {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.7rem;
+  min-height: 44px;
+  margin-top: 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--danger-glow);
+  background: rgba(255, 107, 107, 0.06);
+  color: var(--danger);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.92rem;
+  letter-spacing: 0.02em;
+  transition: opacity 0.2s;
+}
+.climate-stop svg { width: 16px; height: 16px; }
+.climate-stop:disabled { cursor: default; }
+.climate-stop.sending { opacity: 0.7; }
+.climate-stop[hidden] { display: none; }
+
 /* seat grid — top-down car outline with 4 tappable zones */
 .seat-diagram {
   position: relative;

@@ -132,6 +132,28 @@
         <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
       </symbol>
 
+      <!-- Fan at full tilt, for max-defrost (fanMode:"DEFROST") — same blades as
+           icon-fan plus motion lines, so the two read as a matched pair. -->
+      <symbol id="icon-fan-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="1.8" />
+        <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2z" />
+        <path d="M13.8 12c3 0 5.2.8 5.2 2.6 0 1.5-1.6 2.3-3 1.4-1.2-.8-2.2-2.3-2.2-4z" />
+        <path d="M10.2 12c0 3-.8 5.2-2.6 5.2-1.5 0-2.3-1.6-1.4-3 .8-1.2 2.3-2.2 4-2.2z" />
+        <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
+        <path d="M2.2 8.5h1.6M2 12h1.8M2.2 15.5h1.6" />
+      </symbol>
+
+      <!-- Lightning bolt with a slash: stop charging. -->
+      <symbol id="icon-bolt-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
+        <path d="M3.5 3.5l17 17" />
+      </symbol>
+
+      <!-- Stop: filled square, for ending an in-progress climate session. -->
+      <symbol id="icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5.5" y="5.5" width="13" height="13" rx="2.4" />
+      </symbol>
+
       <symbol id="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4.5 20.5V6.8L14 3.5v17z" />
         <path d="M14 20.5h5.5V11L14 6.8" />
@@ -324,11 +346,23 @@
         <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_rear" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-defrost-rear" /></svg> Rear defrost
         </button>
+        <!-- Not the same thing as front/rear defrost: this is fanMode:"DEFROST",
+             a distinct max-airflow mode the car can run alongside either. -->
+        <button type="button" class="hvac-btn comfort-toggle" data-option="max_defrost" aria-pressed="false">
+          <svg aria-hidden="true"><use href="#icon-fan-max" /></svg> Max defrost
+        </button>
       </div>
 
       <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
         <svg aria-hidden="true"><use href="#icon-fan" /></svg>
         <span class="climate-master-label">Start climate</span>
+      </button>
+      <!-- Hidden until a climate start is confirmed running (app.js toggles the
+           `hidden` attribute) — stopping is operation "engineOff", a fully
+           separate request from starting, not a re-send with everything off. -->
+      <button type="button" class="climate-stop" id="climate-stop" hidden aria-label="Stop the running climate session">
+        <svg aria-hidden="true"><use href="#icon-stop" /></svg>
+        Stop climate
       </button>
     </section>
     </div>
@@ -379,6 +413,11 @@
         <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg> Horn</button>
         <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg> Lights</button>
         <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg> Locate</button>
+        <!-- Charging goes through a different backend endpoint than the ops
+             above (the DGE charging microservice, not /avi/v3/remoteOperation)
+             but is still one plain command from the dashboard's perspective. -->
+        <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg> Start charge</button>
+        <button class="cmd-btn" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg> Stop charge</button>
       </div>
     </section>
     </div>

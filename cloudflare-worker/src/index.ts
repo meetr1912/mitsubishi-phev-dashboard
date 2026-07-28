@@ -63,6 +63,14 @@ const OPERATION_MAP: Record<string, string> = {
   horn: "horn",
   lights: "lights",
   locate: "locate",
+  // Confirmed via BEClimatePresenter.stopClimate() -> EngineOffROUseCase ->
+  // performOperation("engineOff", ...). Despite the name, on a PHEV (no
+  // combustion remote-start to shut off) this ends the remote climate /
+  // pre-conditioning session — it is "remoteAC off", not an engine kill.
+  // getEngineOffOptions() returns null for every model except "RX"
+  // (VehicleExt.m11021E), so — unlike "climate" — this sends NO dt block at
+  // all; falling through OPERATION_MAP with extra left undefined matches that.
+  climate_stop: "engineOff",
 };
 
 /**
@@ -92,6 +100,22 @@ const HVAC_OPTIONS: Record<string, { field: string; onValue: string; offValue: s
   defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
   defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
 };
+
+/**
+ * fanMode is NOT the on/off toggle we assumed — it is a MODE with exactly two
+ * legal wire values (FanMode.java): "VENT_FEET" (normal airflow) and "DEFROST"
+ * (max-defrost airflow). "AUTO", which this Worker sent until now, does not
+ * exist anywhere in the app; the server evidently ignored it silently, since
+ * climate start still returned {"status":"Started"} either way. This is a
+ * distinct capability from frontDefrostMode/rearDefrostMode (which toggle the
+ * heated glass elements) — the app can and does combine them.
+ */
+const MAX_DEFROST_OPTION = "max_defrost";
+const FAN_MODE_NORMAL = "VENT_FEET";
+const FAN_MODE_MAX_DEFROST = "DEFROST";
+
+/** Every option string the "climate" action will accept. */
+const CLIMATE_OPTION_KEYS = new Set([...Object.keys(HVAC_OPTIONS), MAX_DEFROST_OPTION]);
 
 const DEFAULT_HVAC_MINUTES = 10;
 const MAX_HVAC_MINUTES = 30;
@@ -202,7 +226,7 @@ export interface ClimateRequest {
 function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
   const selected = new Set(req.options);
   const hvacSettings: Record<string, unknown> = {
-    fanMode: "AUTO",
+    fanMode: selected.has(MAX_DEFROST_OPTION) ? FAN_MODE_MAX_DEFROST : FAN_MODE_NORMAL,
     operationTime: req.minutes,
     // The app's documented default (HVACSettingConstants.CHECK_NUMBER_DEFAULT).
     checkNumber: 75,
@@ -565,6 +589,87 @@ async function runCommand(
 }
 
 /**
+ * Start or stop charging RIGHT NOW.
+ *
+ * This is NOT the same endpoint or builder as the other remote operations.
+ * chargingControl / chargingControlStop route through the DGE microservice
+ * (C9337e.java dispatches them to C9335c "PerformChargingStartAndStopRO";
+ * path from res/raw/environment performchargingstartandstopro.path /
+ * getchargingcontroldge.path), not /avi/v3/remoteOperation. That builder never
+ * emits "forced" or "pinToken" — this call intentionally skips PIN-verify
+ * rather than reusing the remoteAC envelope, since there is no evidence this
+ * endpoint accepts (or wants) either field.
+ *
+ * chargingControlType is the direction (0 = stop, 1 = start) and rides INSIDE
+ * "data" alongside eventTimestamp; the "operation" string also changes between
+ * the two ("chargingControl" vs "chargingControlStop") — so direction is
+ * double-encoded, both in the operation name and in chargingControlType.
+ * operationType is a fixed literal 1 for both directions; it does not encode
+ * direction despite the name.
+ */
+const EP_CHARGING_CONTROL_DGE = "/api/v1/services/chargingcontrol/vin/{vin}";
+
+function isoEventTimestamp(): string {
+  // The app's format is yyyy-MM-ddTHH:mm:ssZ — no milliseconds.
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+async function performChargingControl(
+  accessToken: string,
+  vin: string,
+  direction: "start" | "stop",
+): Promise<unknown> {
+  const operation = direction === "start" ? "chargingControl" : "chargingControlStop";
+  const chargingControlType = direction === "start" ? 1 : 0;
+  const url = BASE_URL + EP_CHARGING_CONTROL_DGE.replace("{vin}", encodeURIComponent(vin));
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: sharedHeaders(`Bearer ${accessToken}`),
+    body: JSON.stringify({
+      vin,
+      operation,
+      operationType: 1,
+      data: { eventTimestamp: isoEventTimestamp(), chargingControlType },
+    }),
+  });
+  if (!res.ok) {
+    throw new ApiError(502, `Charging control failed: HTTP ${res.status} ${await safeText(res)}`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Full charging start/stop flow.
+ *
+ * [UNVERIFIED — response shape] The confirmed shape (C9335c.processJson) keys
+ * the poll id as "correlationId", not "eventId", and wraps the vehicle fields
+ * in "data" (data.vin, data.responseStatus, data.statusTimestamp). This maps
+ * correlationId onto the same generic GetROStatus poll used everywhere else,
+ * which is untested against an id that originated from this microservice
+ * rather than /avi/v3/remoteOperation — it is the documented behaviour, but
+ * has not been exercised live.
+ */
+async function runChargingControl(
+  env: Env,
+  direction: "start" | "stop",
+): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
+  const { accessToken } = await login(env);
+  const vin = await getVin(env, accessToken);
+  const submitted = await performChargingControl(accessToken, vin, direction);
+
+  const eventId = (submitted as { correlationId?: unknown } | null)?.correlationId;
+  if (typeof eventId !== "string" || !eventId) {
+    return { eventId: null, submitted, event: null };
+  }
+  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
+}
+
+/**
  * Fetch this vehicle's climate posmap from the model configuration endpoint.
  *
  * Path from res/raw/environment (getmodelconfigurations.path); the response
@@ -807,6 +912,58 @@ function chargingStatus(value: JsonValue | undefined): string {
   return "not_charging";
 }
 
+/**
+ * String-boolean used across the vehiclestate response: the literal string
+ * "0" means false, anything else present means true. This is NOT the same
+ * rule as toBool() above (an allowlist of truthy words) — vehiclestate's
+ * convention is specifically "not zero", confirmed for svla / diagnostic /
+ * theftAlarm / factoryReset flags.
+ *
+ * [UNVERIFIED] Read from source (GET /avi/v1/vehicles/{vin}/vehiclestate,
+ * confirmed path from res/raw/environment getvehiclemodestatus.path /
+ * getvehiclestate.path) but not exercised against a live response — the exact
+ * field names below may not match what this account's vehicle returns.
+ */
+function stateFlag(value: JsonValue | undefined): boolean | null {
+  const v = scalar(value);
+  if (v === undefined) return null;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  return String(v).trim() !== "0";
+}
+
+export interface VehicleStateSummary {
+  svla: boolean | null;
+  diagnosticMode: boolean | null;
+  privacyModeEnabled: boolean | null;
+  theftAlarm: boolean | null;
+  factoryReset: boolean | null;
+  ignitionOn: boolean | null;
+}
+
+/**
+ * Best-effort read of the safe (non-emergency) flags off vehiclestate.
+ * Deliberately returns null per-field rather than throwing when a field is
+ * absent — an unrecognised shape should degrade to "unknown", not break the
+ * whole read-only summary.
+ *
+ * privacyMode is INVERTED versus every other flag here: "0" means privacy is
+ * ENABLED (locate restricted), "1" means disabled. stateFlag()'s normal
+ * "nonzero = true" rule is flipped for this one field only.
+ */
+function parseVehicleState(raw: JsonValue): VehicleStateSummary {
+  const privacyRaw = firstPresent(raw, ["privacy", "privacyMode"]);
+  const privacyNonzero = stateFlag(privacyRaw);
+  return {
+    svla: stateFlag(firstPresent(raw, ["svla"])),
+    diagnosticMode: stateFlag(firstPresent(raw, ["diagnostic", "diagnosticMode"])),
+    privacyModeEnabled: privacyNonzero === null ? null : !privacyNonzero,
+    theftAlarm: stateFlag(firstPresent(raw, ["theftAlarm", "theftalarm"])),
+    factoryReset: stateFlag(firstPresent(raw, ["factoryReset"])),
+    ignitionOn: stateFlag(firstPresent(raw, ["ignitionState", "ignition"])),
+  };
+}
+
 const DOOR_ALIASES: Record<string, string> = {
   frontleft: "front_left", fl: "front_left", driverfront: "front_left", leftfront: "front_left",
   frontright: "front_right", fr: "front_right", passengerfront: "front_right", rightfront: "front_right",
@@ -934,7 +1091,8 @@ export default {
     const isMqttDiscover = url.pathname === "/mqtt-discover" && request.method === "GET";
     const isSettings = url.pathname === "/settings" && request.method === "GET";
     const isConfig = url.pathname === "/config" && request.method === "GET";
-    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig) {
+    const isState = url.pathname === "/state" && request.method === "GET";
+    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -950,6 +1108,29 @@ export default {
         const vin = await getVin(env, accessToken);
         const latest = await fetchLiveStatus(env, accessToken, vin);
         return json({ success: true, latest });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    // Read-only. svla is exposed here because there is no confirmed write path
+    // for it anywhere in the decompiled app (no DataSvla builder, no dispatch
+    // site) — the dedicated GET /avi/v1/vehicles/{vin}/state/svla endpoint is
+    // also declared in res/raw/environment but never wired to anything in the
+    // app, so this reads the same flag off vehiclestate instead, which IS live.
+    if (isState) {
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const res = await fetch(BASE_URL + EP_VEHICLE_STATE.replace("{vin}", encodeURIComponent(vin)), {
+          headers: sharedHeaders(`Bearer ${accessToken}`),
+        });
+        if (!res.ok) {
+          return json({ success: false, error: `Vehicle state failed: HTTP ${res.status} ${await safeText(res)}` }, 502);
+        }
+        const raw = (await res.json()) as JsonValue;
+        return json({ success: true, state: parseVehicleState(raw) });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -1061,12 +1242,35 @@ export default {
       return json({ success: false, error: "Missing 'action'" }, 400);
     }
 
+    // --- Charging start/stop uses a different endpoint and a different runner
+    // (see runChargingControl) — handled first and returned early, since it
+    // does not go through OPERATION_MAP / runCommand at all.
+    if (action === "charge_start" || action === "charge_stop") {
+      const direction = action === "charge_start" ? "start" : "stop";
+      try {
+        const { eventId, submitted, event } = await runChargingControl(env, direction);
+        if (!event) {
+          return json({ success: true, action, message: `'${action}' submitted.`, eventId, raw: submitted });
+        }
+        const message =
+          event.outcome === "succeeded"
+            ? `Charging ${direction === "start" ? "started" : "stopped"}, confirmed by vehicle.`
+            : event.outcome === "failed"
+              ? `'${action}' rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
+              : `'${action}' sent, but the vehicle did not report back in time.`;
+        return json({ success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
     // --- "climate" is the single entry point for the whole cabin-comfort
     // system. Seat heat, wheel heat and defrost ride along as `options` on this
     // one request rather than being separately actionable, because remoteAC
     // starts climate as a whole — see the HVAC_OPTIONS comment.
     const isHvac = action === "climate";
-    if (!isHvac && Object.prototype.hasOwnProperty.call(HVAC_OPTIONS, action)) {
+    if (!isHvac && CLIMATE_OPTION_KEYS.has(action)) {
       return json(
         {
           success: false,
@@ -1088,7 +1292,7 @@ export default {
     let optionCount = 0;
     if (isHvac) {
       const options = Array.isArray(rawOptions) ? rawOptions.filter((o): o is string => typeof o === "string") : [];
-      const unknownOption = options.find((o) => !Object.prototype.hasOwnProperty.call(HVAC_OPTIONS, o));
+      const unknownOption = options.find((o) => !CLIMATE_OPTION_KEYS.has(o));
       if (unknownOption) {
         return json({ success: false, error: `Unknown climate option '${unknownOption}'` }, 400);
       }
