@@ -566,9 +566,13 @@ export default {
 
     // --- Parse body ---
     let action: unknown;
+    let rawOperation: unknown;
+    let rawExtra: unknown;
     try {
-      const body = (await request.json()) as { action?: unknown };
+      const body = (await request.json()) as { action?: unknown; operation?: unknown; extra?: unknown };
       action = body.action;
+      rawOperation = body.operation;
+      rawExtra = body.extra;
     } catch {
       return json({ success: false, error: "Invalid JSON body" }, 400);
     }
@@ -576,19 +580,24 @@ export default {
       return json({ success: false, error: "Missing 'action'" }, 400);
     }
 
-    // --- TEMPORARY diagnostic: test whether remoteAC works over REST (same
-    // endpoint as the confirmed-working lock/unlock/horn/lights/locate), as
-    // an empirical alternative to continuing to chase the MQTT path. Returns
-    // the RAW server response instead of a generic success message, for
-    // debugging. Remove once climate is either confirmed working or ruled out.
-    if (action === "climate_test") {
+    // --- TEMPORARY diagnostic: send an arbitrary operation + extra body
+    // straight through the confirmed-working REST /avi/v3/remoteOperation
+    // endpoint (same one lock/unlock/horn/lights/locate use), returning the
+    // RAW server response. Lets us empirically probe which of the ~29 known
+    // operation names (RemoteOperationConstants.OperationName) work over REST
+    // without a redeploy per attempt. Body: {"action":"raw_test",
+    // "operation":"remoteAC","extra":{"hvacSettings":{...}}}. Remove once the
+    // climate/full-operation-list question is resolved.
+    if (action === "raw_test") {
       try {
+        const op = typeof rawOperation === "string" ? rawOperation : "";
+        if (!op) return json({ success: false, error: "raw_test requires 'operation'" }, 400);
+        const extra =
+          rawExtra && typeof rawExtra === "object" ? (rawExtra as Record<string, unknown>) : undefined;
         const { accessToken } = await login(env);
         const vin = await getVin(env, accessToken);
         const pinToken = await verifyPin(env, accessToken, vin);
-        const result = await performOperation(env, accessToken, vin, pinToken, "remoteAC", {
-          hvacSettings: { fanMode: "AUTO", operationTime: 20, checkNumber: 0 },
-        });
+        const result = await performOperation(env, accessToken, vin, pinToken, op, extra);
         return json({ success: true, raw: result });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
