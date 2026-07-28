@@ -650,6 +650,25 @@ button {
 .pull-indicator svg { width: 22px; height: 22px; }
 .pull-indicator.spinning svg { animation: spin 0.7s linear infinite; }
 
+/* ============================= SKELETON LOADING ============================= */
+/* On the initial "—" placeholders (tile/door/tire values), before the first
+   render() call has real data. Removed in bulk at the top of render() --
+   by the time any data exists, all fields populate together, so there's no
+   need to track this per-field. */
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.skeleton {
+  color: transparent !important;
+  min-width: 2.4em;
+  border-radius: 4px;
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.10) 50%, rgba(255,255,255,0.04) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
 /* ============================= CHARGING SCHEDULE ============================= */
 .schedule-hint { color: var(--text-dim); font-size: 0.78rem; margin: -0.3rem 0 0.9rem; }
 .charge-timer {

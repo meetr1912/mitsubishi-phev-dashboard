@@ -58,6 +58,13 @@
     var v = data.vehicle || {};
     var l = data.latest || {};
 
+    // Real data exists now -- drop the shimmer placeholders in bulk. Every
+    // field below gets written in this same pass, so there's no point
+    // tracking removal per-field; a no-op on every render after the first.
+    document.querySelectorAll(".skeleton").forEach(function (el) {
+      el.classList.remove("skeleton");
+    });
+
     // header
     setText("#veh-nickname", v.nickname || "PHEV");
     var modelBits = [v.year, v.model, v.exterior_color].filter(Boolean).join(" · ");
