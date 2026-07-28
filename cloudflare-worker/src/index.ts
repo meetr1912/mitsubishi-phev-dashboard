@@ -142,17 +142,27 @@ export interface PosMap {
   celToPos: Record<string, number>;
   minC: number;
   maxC: number;
-  size: number;
+  /** pos of the "LO" endpoint, if the table has one. */
+  loPos: number | null;
+  /** pos of the "HI" endpoint, if the table has one. */
+  hiPos: number | null;
+  step: number;
 }
 
+/**
+ * Snap an arbitrary Celsius value onto the table's own grid.
+ *
+ * Confirmed shape for this account's 2025 DGE (Outlander Electric): 31 entries,
+ * pos 1 = "LO", pos 2..30 = 18.0..32.0 in 0.5 steps, pos 31 = "HI". So 22 °C is
+ * pos 10 — the index and the temperature are nowhere near each other.
+ */
 function celsiusToPos(posmap: PosMap, celsius: number): number {
-  if (celsius < posmap.minC) return 1;
-  if (celsius > posmap.maxC) return posmap.size;
-  // The app formats the lookup key with one decimal ("22.0"), and the table is
-  // authored in 0.5 steps.
-  const exact = posmap.celToPos[celsius.toFixed(1)];
+  if (celsius < posmap.minC) return posmap.loPos ?? 1;
+  if (celsius > posmap.maxC) return posmap.hiPos ?? Object.keys(posmap.celToPos).length;
+  // Snap to the nearest authored rung so the formatted lookup always hits.
+  const snapped = Math.round(celsius / posmap.step) * posmap.step;
+  const exact = posmap.celToPos[snapped.toFixed(1)];
   if (exact !== undefined) return exact;
-  // Nearest authored step, so a value between rungs still resolves.
   let best: number | null = null;
   let bestDelta = Infinity;
   for (const [key, pos] of Object.entries(posmap.celToPos)) {
@@ -162,12 +172,17 @@ function celsiusToPos(posmap: PosMap, celsius: number): number {
       best = pos;
     }
   }
-  return best ?? 1;
+  return best ?? (posmap.loPos ?? 1);
 }
 
-/** Fallback bounds, only used to sanity-clamp input before the posmap is known. */
+/**
+ * Outer sanity bounds only. The real selectable range is the vehicle's posmap
+ * (18..32 for this car) and is enforced against it once fetched; this pair just
+ * stops absurd input before the table is known.
+ */
 const MIN_HVAC_TEMP_C = 15;
-const MAX_HVAC_TEMP_C = 32;
+const MAX_HVAC_TEMP_C = 35;
+const HVAC_TEMP_STEP = 0.5;
 
 export interface ClimateRequest {
   minutes: number;
@@ -584,36 +599,116 @@ async function fetchPosMap(
   const celToPos: Record<string, number> = {};
   let minC = Infinity;
   let maxC = -Infinity;
+  let loPos: number | null = null;
+  let hiPos: number | null = null;
+
   for (const entry of entries) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
     const pos = toInt(entry.pos);
-    const cel = parseFloat(String(scalar(entry.cel) ?? ""));
-    if (pos === null || !Number.isFinite(cel)) continue;
+    if (pos === null) continue;
+    const celRaw = String(scalar(entry.cel) ?? "").trim();
+    // The table's first and last rungs are the literal endpoints "LO" and "HI"
+    // rather than degrees, so they have to be captured separately instead of
+    // being dropped as unparseable.
+    if (/^lo$/i.test(celRaw)) { loPos = pos; continue; }
+    if (/^hi$/i.test(celRaw)) { hiPos = pos; continue; }
+    const cel = parseFloat(celRaw);
+    if (!Number.isFinite(cel)) continue;
     celToPos[cel.toFixed(1)] = pos;
     if (cel < minC) minC = cel;
     if (cel > maxC) maxC = cel;
   }
   if (!Number.isFinite(minC) || !Number.isFinite(maxC)) return { posmap: null, raw: body };
 
-  return { posmap: { celToPos, minC, maxC, size: entries.length }, raw: body };
+  // Derive the grid from the table rather than assuming 0.5.
+  const sorted = Object.keys(celToPos).map(parseFloat).sort((a, b) => a - b);
+  let step = HVAC_TEMP_STEP;
+  if (sorted.length > 1) {
+    const gap = Math.round((sorted[1] - sorted[0]) * 100) / 100;
+    if (gap > 0) step = gap;
+  }
+
+  return { posmap: { celToPos, minC, maxC, loPos, hiPos, step }, raw: body };
 }
 
-/** model / year / country for the posmap lookup, off the vehicle details record. */
+/**
+ * Remote services this VIN's model actually supports, from the same model
+ * configuration response (each entry is {serviceId, serviceName, displayName}).
+ * Useful for hiding controls the car cannot honour.
+ */
+function extractServices(raw: unknown): string[] {
+  const list = findKey(raw as JsonValue, "services");
+  if (!Array.isArray(list)) return [];
+  const names: string[] = [];
+  for (const entry of list) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const name = scalar(entry.serviceName);
+    if (typeof name === "string" && name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * model / year / country for the posmap lookup.
+ *
+ * Consults BOTH the account's vehicle-list record and the per-VIN details
+ * record, because the model name is not reliably present on either alone —
+ * this mirrors build_vehicle() in scripts/cron_log_status.py, which is the
+ * version known to resolve the model correctly. Key order matters: modelName
+ * is checked before model.
+ */
 async function fetchVehicleIdentity(
   accessToken: string,
+  username: string,
   vin: string,
-): Promise<{ model: string; year: string; country: string }> {
-  const res = await fetch(
+): Promise<{ model: string; year: string; country: string; candidates: Record<string, unknown> }> {
+  const sources: JsonValue[] = [];
+
+  const listRes = await fetch(BASE_URL + EP_USER_INFO + encodeURIComponent(username), {
+    headers: sharedHeaders(`Bearer ${accessToken}`),
+  });
+  if (listRes.ok) {
+    const info = (await listRes.json().catch(() => null)) as { vehicles?: JsonValue[] } | null;
+    const record = info?.vehicles?.find(
+      (v) => v !== null && typeof v === "object" && !Array.isArray(v) && scalar(v.vin) === vin,
+    );
+    if (record) sources.push(record);
+  }
+
+  const detailsRes = await fetch(
     BASE_URL + EP_VEHICLE_DETAILS.replace("{vin}", encodeURIComponent(vin)) +
       "?excludes=tuProfile,salesCodes,saleRecord&includes=category",
     { headers: sharedHeaders(`Bearer ${accessToken}`) },
   );
-  if (!res.ok) throw new ApiError(502, `Vehicle details failed: HTTP ${res.status} ${await safeText(res)}`);
-  const body = (await res.json()) as JsonValue;
+  if (detailsRes.ok) {
+    const details = (await detailsRes.json().catch(() => null)) as JsonValue;
+    if (details !== null) sources.push(details);
+  }
+  if (sources.length === 0) throw new ApiError(502, "Could not read vehicle identity");
+
+  const pick = (keys: string[], fallback = ""): string => {
+    for (const src of sources) {
+      const v = scalar(firstPresent(src, keys));
+      if (v !== null && v !== undefined && v !== "") return String(v);
+    }
+    return fallback;
+  };
+
+  // Surfaced on failure so an unknown response shape can be diagnosed without
+  // dumping the whole (PII-bearing) vehicle record.
+  const candidates: Record<string, unknown> = {};
+  for (const key of ["modelName", "model", "modelDescription", "carlineName", "modelCode",
+                     "modelYear", "year", "country", "countryCode", "region"]) {
+    const v = scalar(firstPresent(sources[0], [key]));
+    const v2 = sources[1] ? scalar(firstPresent(sources[1], [key])) : null;
+    if (v !== null || v2 !== null) candidates[key] = v ?? v2;
+  }
+
   return {
-    model: String(scalar(firstPresent(body, ["model", "modelName", "modelCode"])) ?? ""),
-    year: String(scalar(firstPresent(body, ["year", "modelYear"])) ?? ""),
-    country: String(scalar(firstPresent(body, ["country", "countryCode"])) ?? "CA"),
+    model: pick(["modelName", "model", "modelDescription", "carlineName", "modelCode"]),
+    year: pick(["modelYear", "year", "vehicleYear"]),
+    country: pick(["country", "countryCode"], "CA"),
+    candidates,
   };
 }
 
@@ -891,28 +986,29 @@ export default {
       try {
         const { accessToken } = await login(env);
         const vin = await getVin(env, accessToken);
-        const identity = await fetchVehicleIdentity(accessToken, vin);
+        const identity = await fetchVehicleIdentity(accessToken, env.MMC_USERNAME, vin);
         if (!identity.model) {
-          return json({ success: false, error: "Vehicle details had no model", identity }, 502);
+          return json({ success: false, error: "Could not resolve vehicle model", identity }, 502);
         }
         const { posmap, raw } = await fetchPosMap(
           accessToken, identity.model, identity.year, identity.country,
         );
         return json({
           success: true,
-          identity,
+          identity: { model: identity.model, year: identity.year, country: identity.country },
           temperature: posmap
             ? {
                 minC: posmap.minC,
                 maxC: posmap.maxC,
+                step: posmap.step,
+                loPos: posmap.loPos,
+                hiPos: posmap.hiPos,
                 steps: Object.keys(posmap.celToPos)
                   .map(parseFloat)
                   .sort((a, b) => a - b),
-                celToPos: posmap.celToPos,
               }
             : null,
-          // Kept so the posmap extraction can be checked against ground truth.
-          raw,
+          services: extractServices(raw),
         });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
@@ -1010,7 +1106,7 @@ export default {
         try {
           const { accessToken } = await login(env);
           const vin = await getVin(env, accessToken);
-          const identity = await fetchVehicleIdentity(accessToken, vin);
+          const identity = await fetchVehicleIdentity(accessToken, env.MMC_USERNAME, vin);
           if (identity.model) {
             posmap = (await fetchPosMap(accessToken, identity.model, identity.year, identity.country)).posmap;
           }

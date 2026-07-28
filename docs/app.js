@@ -100,6 +100,9 @@
     if (!autoRefreshed) {
       autoRefreshed = true;
       autoRefreshOnUnlock();
+      // Independent of the status fetch: widens the temperature stepper to
+      // whatever this vehicle actually supports.
+      loadTempRange();
     }
   }
 
@@ -256,12 +259,12 @@
   // (armed, outlined); only a confirmed start reads as *running* (filled + glow).
   var VALID_OPTIONS = ["seat_fl", "seat_fr", "seat_rl", "seat_rr",
                        "steering_heat", "defrost_front", "defrost_rear"];
-  // Provisional bounds. The car's real selectable range comes from its own
-  // posmap (a server-supplied {pos, cel, fah} table the Worker exposes on
-  // GET /config) and is a property of the vehicle, not a constant — 19..28 is
-  // just a sane default until that has been read back from the live account.
-  // Degrees are converted to the wire's position index Worker-side.
-  var TEMP_MIN = 19, TEMP_MAX = 28;
+  // Read off this vehicle's own posmap via GET /config (2025 DGE, Outlander
+  // Electric): 18.0–32.0 °C in 0.5 steps, plus LO and HI endpoints. The range
+  // is a property of the car, so /config is also queried at unlock to pick up
+  // a different table without a redeploy. Degrees are converted to the wire's
+  // position index Worker-side — on this car 22 °C is index 10.
+  var TEMP_MIN = 18, TEMP_MAX = 32, TEMP_STEP = 0.5;
   var selectedMinutes = 10;
   var selectedTempC = 22;
   var selectedOptions = {};       // option string -> true
@@ -279,7 +282,35 @@
     if (lbl) lbl.textContent = txt;
   }
   function renderTemp() {
-    if (tempValueEl) tempValueEl.textContent = selectedTempC + "°C";
+    if (!tempValueEl) return;
+    // Half-steps show a decimal, whole degrees stay clean ("22°C", "22.5°C").
+    var txt = (selectedTempC % 1 === 0) ? String(selectedTempC) : selectedTempC.toFixed(1);
+    tempValueEl.textContent = txt + "°C";
+  }
+
+  // The selectable range belongs to the car, not to this code. /config reports
+  // it, so a different vehicle or a firmware change widens the stepper without
+  // a redeploy. Silent and best-effort: on any failure the values read off this
+  // vehicle's posmap stay in force.
+  async function loadTempRange() {
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) return;
+    try {
+      var res = await fetch(CONFIG.WORKER_URL + "/config", {
+        headers: { "X-Dashboard-Key": key }
+      });
+      if (!res.ok) return;
+      var body = await res.json();
+      var t = body && body.temperature;
+      if (!t || typeof t.minC !== "number" || typeof t.maxC !== "number") return;
+      if (t.maxC <= t.minC) return;
+      TEMP_MIN = t.minC;
+      TEMP_MAX = t.maxC;
+      if (typeof t.step === "number" && t.step > 0) TEMP_STEP = t.step;
+      if (selectedTempC < TEMP_MIN) selectedTempC = TEMP_MIN;
+      if (selectedTempC > TEMP_MAX) selectedTempC = TEMP_MAX;
+      renderTemp();
+    } catch (e) { /* keep the built-in range */ }
   }
 
   // A confirmed-running comfort zone stays lit for the chosen duration then
@@ -331,8 +362,15 @@
     markPending();
   }
 
-  function stepTemp(delta) {
-    var next = selectedTempC + delta;
+  // delta is a direction (-1 / +1), not a temperature — one press moves one
+  // rung of the car's own grid, which is half a degree here.
+  function stepTemp(direction) {
+    if (!direction) return;
+    var next = selectedTempC + (direction > 0 ? TEMP_STEP : -TEMP_STEP);
+    // Float arithmetic on 0.5 steps drifts (22.5 + 0.5 - 0.5 !== 22.5 exactly),
+    // so round back onto the grid each time.
+    next = Math.round(next / TEMP_STEP) * TEMP_STEP;
+    next = Math.round(next * 10) / 10;
     if (next < TEMP_MIN) next = TEMP_MIN;
     if (next > TEMP_MAX) next = TEMP_MAX;
     if (next === selectedTempC) return;
