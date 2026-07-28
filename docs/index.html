@@ -47,6 +47,17 @@
       });
     };
   </script>
+
+  <!-- Caches the static shell only (never live vehicle data or any Worker
+       call) so reopening the installed app paints instantly, even offline
+       or on a slow connection. See sw.js for exactly what's covered. -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("./sw.js").catch(function () { /* best-effort */ });
+      });
+    }
+  </script>
 </head>
 <body>
   <!-- Standalone (installed) PWAs don't get Safari's own pull-to-refresh --
