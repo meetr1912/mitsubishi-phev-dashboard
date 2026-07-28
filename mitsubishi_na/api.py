@@ -32,6 +32,12 @@ from .const import (
     EP_VEHICLE_SUBSCRIPTIONS_ACTIVE,
     EP_VEHICLE_SUBSCRIPTIONS_ALL,
     EP_AMS_CLIMATE_SCHEDULE,
+    EP_AMS_CLIMATE_SCHEDULE_STATUS,
+    EP_NOTIFICATIONS,
+    EP_RO_STATUS,
+    EP_PARENTAL_ALERT,
+    EP_LOCATION,
+    EP_SVLA_STATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,7 +146,14 @@ class MitsubishiNAClient:
         if r.status_code != 200:
             _LOGGER.debug("GET %s: HTTP %s %s", path, r.status_code, r.text)
             return None
-        return r.json()
+        if not r.text.strip():
+            _LOGGER.debug("GET %s: HTTP 200 with empty body", path)
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            _LOGGER.error("GET %s: HTTP 200 non-JSON body: %r", path, r.text)
+            return None
 
     async def async_get_user_info(self) -> dict | None:
         return await self._get(EP_USER_INFO.format(email=self._username))
@@ -203,6 +216,13 @@ class MitsubishiNAClient:
         """Current climate schedule list — read-only, safe to call anytime."""
         return await self._get(EP_AMS_CLIMATE_SCHEDULE.format(vin=vin))
 
+    async def async_get_climate_schedule_status(self, vin: str, correlation_id: str) -> dict | None:
+        """Poll the outcome of a PerformAMSClimateControlRO write by its eventId."""
+        return await self._get(
+            EP_AMS_CLIMATE_SCHEDULE_STATUS.format(vin=vin),
+            params={"correlationId": correlation_id},
+        )
+
     async def async_get_purchasable_packages(
         self, vin: str, category: str = "SERVICE", check_promo_eligibility: bool = True,
         hide_regular_for_promo: bool = False,
@@ -227,3 +247,56 @@ class MitsubishiNAClient:
     async def async_get_subscriptions(self, vin: str, active_only: bool = True) -> dict | None:
         path = EP_VEHICLE_SUBSCRIPTIONS_ACTIVE if active_only else EP_VEHICLE_SUBSCRIPTIONS_ALL
         return await self._get(path.format(vin=vin))
+
+    # ------------------------------------------------------------------
+    # Event / activity feed
+    # ------------------------------------------------------------------
+
+    async def async_get_notifications(self, vin: str) -> dict | None:
+        """The vehicle's notification feed — the closest thing to an event stream.
+
+        Unlike EP_RO_STATUS, which can only be read back for an eventId you
+        already hold, this returns events the backend generated on its own
+        (alerts, charge start/stop, curfew and geofence trips, etc.), so it is
+        what lets the hourly logger pick up activity it did not initiate.
+        """
+        return await self._get(EP_NOTIFICATIONS.format(vin=vin))
+
+    async def async_get_ro_status(self, vin: str, event_id: str) -> dict | None:
+        """Outcome of one remote operation, by the eventId PerformRO returned.
+
+        Read-only: polling this does not actuate anything.
+        """
+        return await self._get(EP_RO_STATUS.format(vin=vin, event_id=event_id))
+
+    # ------------------------------------------------------------------
+    # Settings groups (all one endpoint, distinguished by ?operation=)
+    # ------------------------------------------------------------------
+
+    async def async_get_parental_alert(self, vin: str, operation: str) -> dict | None:
+        """Read one settings group off the shared parentalAlert endpoint.
+
+        Valid operations, per res/raw/environment: remoteAC, climateControl,
+        chargingControl, chargingControl2, curfew, geofence, speedAlert,
+        privacyMode.
+        """
+        return await self._get(
+            EP_PARENTAL_ALERT.format(vin=vin), params={"operation": operation}
+        )
+
+    async def async_get_climate_control(self, vin: str) -> dict | None:
+        return await self.async_get_parental_alert(vin, "remoteAC")
+
+    async def async_get_charging_control(self, vin: str) -> dict | None:
+        return await self.async_get_parental_alert(vin, "chargingControl")
+
+    # ------------------------------------------------------------------
+    # Location / mode
+    # ------------------------------------------------------------------
+
+    async def async_get_location(self, vin: str) -> dict | None:
+        return await self._get(EP_LOCATION.format(vin=vin))
+
+    async def async_get_svla_state(self, vin: str) -> dict | None:
+        """Stolen-Vehicle Locator Assistance state."""
+        return await self._get(EP_SVLA_STATE.format(vin=vin))

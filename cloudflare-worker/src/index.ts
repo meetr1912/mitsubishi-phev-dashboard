@@ -64,19 +64,24 @@ const OPERATION_MAP: Record<string, string> = {
 };
 
 /**
- * Climate-family actions — all dispatched as operation="remoteAC" with a
- * per-action hvacSettings field, over the SAME REST /avi/v3/remoteOperation
- * endpoint as the simple commands above. CONFIRMED working live (2026-07-28):
- * a real request with frontLeftSeatControl/steeringHeaterControl/
- * frontDefrostMode all set to their "on" value returned
- * {"status":"Started"} from the real backend. No MQTT needed — the earlier
- * static-analysis conclusion that hvacSettings was MQTT-only was wrong.
+ * Cabin-comfort options, all carried inside ONE operation="remoteAC" request
+ * over the same REST /avi/v3/remoteOperation endpoint as the simple commands.
+ * CONFIRMED working live (2026-07-28): a real request with
+ * frontLeftSeatControl/steeringHeaterControl/frontDefrostMode all set to their
+ * "on" value returned {"status":"Started"} from the real backend. No MQTT
+ * needed — the earlier static-analysis conclusion that hvacSettings was
+ * MQTT-only was wrong.
  *
  * on/off values per HVACOption.java: seats use HEATER_ON/HEATER_OFF,
  * defrost + steering wheel use TURN_ON/TURN_OFF.
+ *
+ * These are deliberately NOT individually addressable actions. remoteAC starts
+ * the whole climate system; firing one per seat would mean each press restarts
+ * climate and silently drops whatever the previous press had enabled. The
+ * dashboard therefore collects the toggles locally and submits them together
+ * as a single climate start.
  */
-const HVAC_ACTIONS: Record<string, { field?: string; onValue?: string; offValue?: string }> = {
-  climate: {},
+const HVAC_OPTIONS: Record<string, { field: string; onValue: string; offValue: string }> = {
   seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
   seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
   seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
@@ -89,14 +94,50 @@ const HVAC_ACTIONS: Record<string, { field?: string; onValue?: string; offValue?
 const DEFAULT_HVAC_MINUTES = 10;
 const MAX_HVAC_MINUTES = 30;
 
-function buildHvacExtra(action: string, minutes: number): Record<string, unknown> {
-  const cfg = HVAC_ACTIONS[action] ?? {};
+/**
+ * Target cabin temperature.
+ *
+ * [UNVERIFIED] The wire key for temperature inside the immediate remoteAC
+ * hvacSettings object is NOT yet confirmed. "frontTemperature" exists in the
+ * decompiled app but so far only on the SCHEDULER path
+ * (PerformAMSClimateControlRO -> /api/v1/services/climatecontrol/{vin}/schedule,
+ * via ConditioningDefinition), which is a different endpoint from
+ * /avi/v3/remoteOperation. Until that is settled, temperature is accepted and
+ * clamped here but deliberately NOT serialised onto the wire — sending a
+ * guessed field name risks the backend rejecting the whole request, which
+ * would break seat heat too. Set HVAC_TEMP_FIELD once confirmed.
+ */
+const HVAC_TEMP_FIELD: string | null = null;
+const MIN_HVAC_TEMP_C = 19;
+const MAX_HVAC_TEMP_C = 28;
+
+export interface ClimateRequest {
+  minutes: number;
+  temperatureC: number | null;
+  options: string[];
+}
+
+/**
+ * Build the hvacSettings payload for a climate start.
+ *
+ * Every known option is written explicitly — selected ones to their onValue,
+ * unselected ones to their offValue — so the resulting cabin state matches
+ * exactly what the dashboard was showing when the button was pressed, rather
+ * than inheriting leftovers from a previous run.
+ */
+function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
+  const selected = new Set(req.options);
   const hvacSettings: Record<string, unknown> = {
     fanMode: "AUTO",
-    operationTime: minutes,
+    operationTime: req.minutes,
     checkNumber: 0,
   };
-  if (cfg.field && cfg.onValue) hvacSettings[cfg.field] = cfg.onValue;
+  for (const [name, cfg] of Object.entries(HVAC_OPTIONS)) {
+    hvacSettings[cfg.field] = selected.has(name) ? cfg.onValue : cfg.offValue;
+  }
+  if (HVAC_TEMP_FIELD && req.temperatureC !== null) {
+    hvacSettings[HVAC_TEMP_FIELD] = req.temperatureC;
+  }
   return { hvacSettings };
 }
 
@@ -728,10 +769,19 @@ export default {
     // --- Parse body ---
     let action: unknown;
     let rawMinutes: unknown;
+    let rawTemp: unknown;
+    let rawOptions: unknown;
     try {
-      const body = (await request.json()) as { action?: unknown; minutes?: unknown };
+      const body = (await request.json()) as {
+        action?: unknown;
+        minutes?: unknown;
+        temperatureC?: unknown;
+        options?: unknown;
+      };
       action = body.action;
       rawMinutes = body.minutes;
+      rawTemp = body.temperatureC;
+      rawOptions = body.options;
     } catch {
       return json({ success: false, error: "Invalid JSON body" }, 400);
     }
@@ -739,21 +789,44 @@ export default {
       return json({ success: false, error: "Missing 'action'" }, 400);
     }
 
-    // --- HVAC-family actions (climate, seat heat x4, steering wheel heat,
-    // front/rear defrost) — CONFIRMED working live (2026-07-28) over the same
-    // REST /avi/v3/remoteOperation endpoint as the simple commands, operation
-    // "remoteAC" with a per-action hvacSettings field. Duration is
-    // caller-supplied (dashboard exposes a minutes selector), clamped to a
-    // sane range so nothing runs unbounded.
-    const isHvac = Object.prototype.hasOwnProperty.call(HVAC_ACTIONS, action);
+    // --- "climate" is the single entry point for the whole cabin-comfort
+    // system. Seat heat, wheel heat and defrost ride along as `options` on this
+    // one request rather than being separately actionable, because remoteAC
+    // starts climate as a whole — see the HVAC_OPTIONS comment.
+    const isHvac = action === "climate";
+    if (!isHvac && Object.prototype.hasOwnProperty.call(HVAC_OPTIONS, action)) {
+      return json(
+        {
+          success: false,
+          error: `'${action}' is not a standalone command — send action "climate" with options:["${action}", ...] instead.`,
+        },
+        400,
+      );
+    }
+
     const operation = isHvac ? "remoteAC" : OPERATION_MAP[action];
     if (!operation) {
       return json({ success: false, error: `Unknown action '${action}'` }, 400);
     }
 
-    const requested = typeof rawMinutes === "number" ? rawMinutes : DEFAULT_HVAC_MINUTES;
-    const minutes = Math.max(1, Math.min(MAX_HVAC_MINUTES, Math.round(requested)));
-    const extra = isHvac ? buildHvacExtra(action, minutes) : undefined;
+    const requestedMinutes = typeof rawMinutes === "number" ? rawMinutes : DEFAULT_HVAC_MINUTES;
+    const minutes = Math.max(1, Math.min(MAX_HVAC_MINUTES, Math.round(requestedMinutes)));
+
+    let extra: Record<string, unknown> | undefined;
+    let optionCount = 0;
+    if (isHvac) {
+      const options = Array.isArray(rawOptions) ? rawOptions.filter((o): o is string => typeof o === "string") : [];
+      const unknownOption = options.find((o) => !Object.prototype.hasOwnProperty.call(HVAC_OPTIONS, o));
+      if (unknownOption) {
+        return json({ success: false, error: `Unknown climate option '${unknownOption}'` }, 400);
+      }
+      const temperatureC =
+        typeof rawTemp === "number" && Number.isFinite(rawTemp)
+          ? Math.max(MIN_HVAC_TEMP_C, Math.min(MAX_HVAC_TEMP_C, Math.round(rawTemp)))
+          : null;
+      optionCount = options.length;
+      extra = buildHvacExtra({ minutes, temperatureC, options });
+    }
 
     try {
       const { eventId, submitted, event } = await runCommand(env, operation, extra);
@@ -764,7 +837,9 @@ export default {
         return json({ success: true, action, message: `'${action}' submitted.`, eventId, raw: submitted });
       }
 
-      const duration = isHvac ? ` for ${minutes} min` : "";
+      const duration = isHvac
+        ? ` for ${minutes} min${optionCount ? ` (+${optionCount} comfort option${optionCount === 1 ? "" : "s"})` : ""}`
+        : "";
       const message =
         event.outcome === "succeeded"
           ? `'${action}' confirmed by vehicle${duration}.`

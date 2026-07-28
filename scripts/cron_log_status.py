@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -905,13 +906,150 @@ async def collect(client: MitsubishiNAClient, timezone_name: str) -> dict:
                 ])),
             })
 
+    # Event feed. Best-effort: an account without notifications, or a shape we
+    # fail to recognise, must not take down the whole hourly log.
+    event_rows = []
+    try:
+        notifications = await client.async_get_notifications(vin)
+        if notifications:
+            event_rows = parse_events(notifications)
+    except Exception as err:  # noqa: BLE001 - best-effort
+        print(f"notifications failed: {err}", file=sys.stderr)
+
+    # Current settings groups, so the dashboard can show what the car believes
+    # is configured rather than only what we last asked it to do. All read-only.
+    settings = {}
+    for operation in ("remoteAC", "chargingControl", "climateControl"):
+        try:
+            got = await client.async_get_parental_alert(vin, operation)
+        except Exception as err:  # noqa: BLE001 - best-effort
+            print(f"settings {operation} failed: {err}", file=sys.stderr)
+            continue
+        if got:
+            settings[operation] = got
+
     return {
         "vin": vin,
         "vehicle": build_vehicle(vehicle, details),
         "latest": latest,
         "monthly_rows": monthly_rows,
         "charging_rows": charging_rows,
+        "event_rows": event_rows,
+        "settings": settings,
     }
+
+
+# ---------------------------------------------------------------------------
+# Event feed
+#
+# The notification endpoint is the only source of events the backend generated
+# on its own (charge start/stop, alerts, curfew and geofence trips, completed
+# remote operations). EP_RO_STATUS can only be read back for an eventId you
+# already hold, so it cannot tell us about activity this logger did not itself
+# initiate -- polling notifications can.
+#
+# The exact response shape is NOT confirmed against a live account, so parsing
+# is deliberately best-effort and every record keeps its untouched `raw`
+# payload. If the field mapping below guesses wrong we still lose nothing, and
+# the mapping can be corrected later against real stored data.
+# ---------------------------------------------------------------------------
+
+EVENT_RETENTION_DAYS = 365
+MAX_EVENTS = 500
+
+_EVENT_LIST_KEYS = ("notifications", "events", "items", "results", "content", "data", "list")
+
+
+def _find_event_list(obj) -> list:
+    """First list-of-dicts found under any plausible container key."""
+    if isinstance(obj, list):
+        return [e for e in obj if isinstance(e, dict)]
+    if not isinstance(obj, dict):
+        return []
+    for key in _EVENT_LIST_KEYS:
+        val = obj.get(key)
+        if isinstance(val, list) and any(isinstance(e, dict) for e in val):
+            return [e for e in val if isinstance(e, dict)]
+    # Fall back to a recursive search for the first qualifying list.
+    for val in obj.values():
+        found = _find_event_list(val)
+        if found:
+            return found
+    return []
+
+
+def _event_ts(entry: dict) -> str:
+    """Best-effort ISO-8601 UTC timestamp for one event."""
+    raw = _first_present(entry, [
+        "ts", "timestamp", "createdAt", "creationTime", "eventTime",
+        "notificationTime", "statusTimestamp", "time", "date",
+    ])
+    val = _scalar(raw)
+    if isinstance(val, (int, float)):
+        # Epoch, in seconds or milliseconds depending on magnitude.
+        seconds = val / 1000 if val > 1e11 else val
+        try:
+            return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return str(val) if val is not None else ""
+
+
+def _event_id(entry: dict, ts: str) -> str:
+    """Stable identity for dedup, synthesised when the feed gives no id."""
+    explicit = _scalar(_first_present(entry, [
+        "id", "eventId", "event_id", "notificationId", "messageId", "uuid",
+    ]))
+    if explicit not in (None, ""):
+        return str(explicit)
+    # No id: hash the content so the same event dedups across runs.
+    blob = json.dumps(entry, sort_keys=True, default=str)
+    return "syn-" + hashlib.sha256((ts + blob).encode("utf-8")).hexdigest()[:16]
+
+
+def parse_events(raw) -> list:
+    """Normalise the notification feed into flat, dedupable event records."""
+    rows = []
+    for entry in _find_event_list(raw):
+        ts = _event_ts(entry)
+        rows.append({
+            "id": _event_id(entry, ts),
+            "ts": ts,
+            "type": _scalar(_first_present(entry, [
+                "type", "eventType", "notificationType", "category", "serviceType",
+            ])),
+            "operation": _scalar(_first_present(entry, ["operation", "operationType", "roName"])),
+            "status": _scalar(_first_present(entry, ["status", "result", "outcome", "state"])),
+            "reason_code": _scalar(_first_present(entry, ["reasonCode", "responseCode", "code"])),
+            "title": _scalar(_first_present(entry, ["title", "subject", "heading", "name"])),
+            "message": _scalar(_first_present(entry, ["message", "body", "text", "description"])),
+            # Kept verbatim: the mapping above is unverified, so this is the
+            # ground truth we can re-parse later without re-fetching.
+            "raw": entry,
+        })
+    return rows
+
+
+def merge_events(existing: list, incoming: list, now: datetime) -> list:
+    """Upsert by id, newest first, pruned by age and hard count cap."""
+    by_id = {}
+    for row in (existing or []):
+        if isinstance(row, dict) and row.get("id"):
+            by_id[row["id"]] = row
+    for row in incoming:
+        if row.get("id"):
+            # Incoming wins: a pending event may since have reached a terminal
+            # status, and that later record is the one worth keeping.
+            by_id[row["id"]] = row
+
+    cutoff = (now - timedelta(days=EVENT_RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = [
+        r for r in by_id.values()
+        # Keep events with an unparseable ts rather than silently dropping them.
+        if not r.get("ts") or r["ts"] >= cutoff
+    ]
+    rows.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return rows[:MAX_EVENTS]
 
 
 def assemble(prior: dict, collected: dict, generated_at: str,
@@ -935,6 +1073,8 @@ def assemble(prior: dict, collected: dict, generated_at: str,
 
     rollups = update_rollups(prior.get("rollups", {}), hourly, monthly_distance, now)
 
+    events = merge_events(prior.get("events", []), collected.get("event_rows", []), now)
+
     doc = {
         "generated_at": generated_at,
         "vin": collected["vin"],
@@ -943,10 +1083,13 @@ def assemble(prior: dict, collected: dict, generated_at: str,
         "hourly_history": hourly,
         "rollups": rollups,
         "monthly_distance": monthly_distance,
+        "events": events,
     }
     # Additive, contract-compatible: the browser decrypter ignores unknown keys.
     if collected["charging_rows"]:
         doc["charging_history"] = collected["charging_rows"]
+    if collected.get("settings"):
+        doc["settings"] = collected["settings"]
     return doc
 
 
@@ -997,7 +1140,8 @@ async def main() -> None:
         f"daily={len(rollups['daily'])} "
         f"monthly={len(rollups['monthly'])} "
         f"yearly={len(rollups['yearly'])} "
-        f"months={len(doc['monthly_distance'])}"
+        f"months={len(doc['monthly_distance'])} "
+        f"events={len(doc['events'])}"
     )
 
 

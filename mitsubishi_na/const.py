@@ -121,6 +121,11 @@ EP_AMS_CLIMATE_SCHEDULE = "/api/v1/services/climatecontrol/{vin}/schedule"
 EP_AMS_CLIMATE_SCHEDULE_STATUS = "/api/v1/services/climatecontrol/{vin}/schedule/status"  # ?correlationId=
 EP_DGE_CHARGING_CONTROL = "/api/v1/services/chargingcontrol/vin/{vin}"  # getchargingcontroldge / performchargingstartandstopro
 
+# --- Live vehicle sub-state (avi, VIN-scoped) ---
+EP_LOCATION = "/avi/v1/vehicles/{vin}/state/location"  # getlocation
+EP_SVLA_STATE = "/avi/v1/vehicles/{vin}/state/svla"  # getsvlastate
+EP_VEHICLE_MODE_STATUS = "/avi/v1/vehicles/{vin}/vehiclestate"  # getvehiclemodestatus
+
 # --- Location / navigation ---
 EP_VEHICLE_LOCATION = "/api/v1/vehicles/{vehicle_id}/users/{account_dn}/location"  # ?locationType=
 EP_SEARCH_LOCATION_HISTORY = "/api/v1/vehicles/{vehicle_id}/users/{account_dn}/location"  # ?locationType=history
