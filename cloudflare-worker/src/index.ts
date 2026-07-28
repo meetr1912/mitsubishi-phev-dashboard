@@ -549,7 +549,17 @@ export default {
         return json({ success: true, ...discovery });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
-        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+        const clientIdDiag = {
+          length: env.MMC_CLIENT_ID?.length ?? 0,
+          hasWhitespace: /\s/.test(env.MMC_CLIENT_ID ?? ""),
+          matchesUuidShape: /^[0-9a-f-]{20,40}$/i.test(env.MMC_CLIENT_ID ?? ""),
+          firstChar: (env.MMC_CLIENT_ID ?? "").slice(0, 1),
+          lastChar: (env.MMC_CLIENT_ID ?? "").slice(-1),
+        };
+        return json(
+          { success: false, error: `Unexpected error: ${(err as Error).message}`, clientIdDiag },
+          500,
+        );
       }
     }
 
