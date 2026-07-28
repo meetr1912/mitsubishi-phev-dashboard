@@ -281,9 +281,58 @@
           phone, not encryption. "Use passphrase instead" always works if Face ID has an issue.</p>
       </div>
 
+      <div class="settings-row">
+        <button id="btn-shortcuts-setup" type="button" class="btn-ghost">Set up iPhone Quick Actions →</button>
+      </div>
+
       <div class="modal-actions">
         <button id="settings-save" type="button" class="btn-primary">Save</button>
         <button id="settings-close" type="button" class="btn-ghost">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================= QUICK ACTIONS (iOS SHORTCUTS) SETUP =============================
+       There's no native app here, so a real WidgetKit home-screen widget
+       isn't buildable -- Apple's Shortcuts app + its own Home Screen/widget
+       support is the real substitute: each action below becomes a single
+       "Get Contents of URL" Shortcut hitting the Worker directly, skipping
+       the whole dashboard UI. Faster than opening the app for a single
+       command, which is the actual point. Values below are pre-filled with
+       this browser's saved key so they're copy-paste ready, not templates. -->
+  <div id="shortcuts-modal" class="modal" aria-hidden="true">
+    <div class="modal-card modal-card--wide">
+      <h2>iPhone Quick Actions</h2>
+      <p class="hint">Build each of these once in the Shortcuts app (Get Contents of URL), then
+        Share → Add to Home Screen for a 1-tap icon, or long-press the Home Screen → Edit → Add
+        Widget → Shortcuts to pin up to 4. One tap, no need to open this dashboard at all.</p>
+
+      <div class="shortcut-field">
+        <label>URL</label>
+        <div class="copy-row">
+          <code id="sc-url"></code>
+          <button type="button" class="btn-copy" data-copy-target="sc-url">Copy</button>
+        </div>
+      </div>
+      <div class="shortcut-field">
+        <label>Method</label>
+        <div class="copy-row"><code>POST</code></div>
+      </div>
+      <div class="shortcut-field">
+        <label>Headers</label>
+        <div class="copy-row">
+          <code>Content-Type: application/json</code>
+        </div>
+        <div class="copy-row">
+          <code id="sc-header"></code>
+          <button type="button" class="btn-copy" data-copy-target="sc-header">Copy</button>
+        </div>
+      </div>
+
+      <div id="sc-actions" class="shortcut-actions"></div>
+
+      <div class="modal-actions">
+        <button id="shortcuts-close" type="button" class="btn-ghost">Close</button>
       </div>
     </div>
   </div>
@@ -648,6 +697,7 @@
   <script src="crypto.js" defer></script>
   <script src="app.js" defer></script>
   <script src="pull-refresh.js" defer></script>
+  <script src="shortcuts-setup.js" defer></script>
   <script src="charts.js" defer></script>
   <script src="nav.js" defer></script>
 
