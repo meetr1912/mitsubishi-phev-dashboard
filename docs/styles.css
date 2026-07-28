@@ -633,6 +633,23 @@ button {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ============================= PULL TO REFRESH ============================= */
+/* Height here (56px) must match INDICATOR_HEIGHT in pull-refresh.js. */
+.pull-indicator {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 56px;
+  display: flex; align-items: center; justify-content: center;
+  transform: translateY(-56px);
+  transition: transform 0.25s ease;
+  z-index: 150; /* above the sticky header (20), below toasts (200) */
+  pointer-events: none;
+  color: var(--accent);
+}
+.pull-indicator.dragging { transition: none; }
+.pull-indicator svg { width: 22px; height: 22px; }
+.pull-indicator.spinning svg { animation: spin 0.7s linear infinite; }
+
 /* ============================= CHARGING SCHEDULE ============================= */
 .schedule-hint { color: var(--text-dim); font-size: 0.78rem; margin: -0.3rem 0 0.9rem; }
 .charge-timer {

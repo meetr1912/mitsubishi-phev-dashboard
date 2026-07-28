@@ -623,6 +623,12 @@
   var refreshBtn = document.getElementById("btn-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", function () { refreshNow(refreshBtn); });
 
+  // Exposed so pull-refresh.js can drive the exact same loud (spinner +
+  // toast) refresh from a pull gesture instead of duplicating this logic.
+  // refreshNow only touches .disabled/.classList on whatever element it's
+  // given, so a plain div works exactly like the real button.
+  window.PHEV.refreshNow = refreshNow;
+
   // ---- one-shot auto refresh on unlock ----
   // The cached snapshot can be up to an hour stale, so pull one live status right
   // after unlock — the first view is then current with no manual refresh. Quiet

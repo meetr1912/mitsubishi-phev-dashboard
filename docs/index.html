@@ -49,6 +49,13 @@
   </script>
 </head>
 <body>
+  <!-- Standalone (installed) PWAs don't get Safari's own pull-to-refresh --
+       this fills that gap. Hidden above the viewport until dragged down;
+       see pull-refresh.js. -->
+  <div id="pull-indicator" class="pull-indicator" aria-hidden="true">
+    <svg aria-hidden="true"><use href="#icon-refresh" /></svg>
+  </div>
+
   <!-- ============================= ICON SPRITE =============================
        Original line-icon set drawn for this dashboard. Uniform 24x24 grid,
        1.6 stroke, round caps — deliberately consistent so heat controls and
@@ -629,6 +636,7 @@
   <!-- App modules (plain scripts, communicate through window.PHEV) -->
   <script src="crypto.js" defer></script>
   <script src="app.js" defer></script>
+  <script src="pull-refresh.js" defer></script>
   <script src="charts.js" defer></script>
   <script src="nav.js" defer></script>
 
