@@ -8,11 +8,12 @@
 
   var charts = { battery: null, odometer: null, daily: null, monthly: null };
 
+  // Mirrors the --ice / --ember pair in styles.css.
   var COLORS = {
-    accent: "#3ecf8e",
-    accent2: "#5b8cff",
-    grid: "rgba(148,163,184,0.14)",
-    text: "#9aa7b8"
+    accent: "#6fd6ff",
+    accent2: "#ff8a3d",
+    grid: "rgba(148,209,255,0.10)",
+    text: "#5c7086"
   };
 
   function ready() { return typeof window.Chart !== "undefined"; }
@@ -72,7 +73,7 @@
           label: "Battery %",
           data: data,
           borderColor: COLORS.accent,
-          backgroundColor: "rgba(62,207,142,0.15)",
+          backgroundColor: "rgba(111,214,255,0.15)",
           fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -101,7 +102,7 @@
           label: "Odometer (km)",
           data: data,
           borderColor: COLORS.accent2,
-          backgroundColor: "rgba(91,140,255,0.12)",
+          backgroundColor: "rgba(255,138,61,0.12)",
           fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -130,7 +131,7 @@
         datasets: [{
           label: "Distance (km)",
           data: data,
-          backgroundColor: "rgba(91,140,255,0.55)",
+          backgroundColor: "rgba(255,138,61,0.55)",
           borderColor: COLORS.accent2,
           borderWidth: 1, borderRadius: 4
         }]
@@ -169,7 +170,7 @@
         datasets: [{
           label: "Distance (" + unit + ")",
           data: series,
-          backgroundColor: "rgba(62,207,142,0.55)",
+          backgroundColor: "rgba(111,214,255,0.55)",
           borderColor: COLORS.accent,
           borderWidth: 1, borderRadius: 4
         }]

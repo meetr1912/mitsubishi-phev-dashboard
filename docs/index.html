@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0d1117" />
+  <meta name="theme-color" content="#05070d" />
   <title>PHEV Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="styles.css" />
 
   <!-- three.js is ESM-only in modern versions; expose it via an import map so
@@ -37,10 +39,128 @@
   </script>
 </head>
 <body>
+  <!-- ============================= ICON SPRITE =============================
+       Original line-icon set drawn for this dashboard. Uniform 24x24 grid,
+       1.6 stroke, round caps — deliberately consistent so heat controls and
+       status controls read as one family. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <g id="i-base" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></g>
+
+      <symbol id="icon-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
+      </symbol>
+
+      <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 11a8 8 0 1 0-.7 4.3" />
+        <path d="M20 5v6h-6" />
+      </symbol>
+
+      <symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" />
+      </symbol>
+
+      <symbol id="icon-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v9" />
+        <path d="M6.8 6.8a7.5 7.5 0 1 0 10.4 0" />
+      </symbol>
+
+      <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4.5" y="10.5" width="15" height="10" rx="2.2" />
+        <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+        <circle cx="12" cy="15.5" r="1.2" />
+      </symbol>
+
+      <symbol id="icon-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4.5" y="10.5" width="15" height="10" rx="2.2" />
+        <path d="M8 10.5V7.5a4 4 0 0 1 7.7-1.5" />
+        <circle cx="12" cy="15.5" r="1.2" />
+      </symbol>
+
+      <symbol id="icon-horn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9.5v5h3.5L12 19V5L6.5 9.5H3z" />
+        <path d="M15.5 9a4 4 0 0 1 0 6" />
+        <path d="M18.3 6.4a8 8 0 0 1 0 11.2" />
+      </symbol>
+
+      <symbol id="icon-lights" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 7.5h3.2a6 6 0 0 1 0 9H3.5z" />
+        <path d="M12.5 6.5h5M12.5 12h6.5M12.5 17.5h5" />
+      </symbol>
+
+      <symbol id="icon-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 21s6.5-6 6.5-10.5a6.5 6.5 0 1 0-13 0C5.5 15 12 21 12 21z" />
+        <circle cx="12" cy="10.5" r="2.3" />
+      </symbol>
+
+      <!-- Seat heater, side profile: backrest + cushion + a rising heat wave.
+           Turns ember when that zone is on. -->
+      <symbol id="icon-seat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.4 3.5h3.3a2.2 2.2 0 0 1 2.2 2.2v8.8H8.4a2.2 2.2 0 0 1-2.2-2.2V5.7a2.2 2.2 0 0 1 2.2-2.2z" />
+        <path d="M5.4 16.4h9.9a2.3 2.3 0 0 1 2.3 2.3v1.8" />
+        <path d="M19.7 4.3c-1 .9-1 2 0 2.9s1 2 0 2.9" />
+      </symbol>
+
+      <symbol id="icon-steering" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="8.5" />
+        <circle cx="12" cy="12" r="2.6" />
+        <path d="M12 3.5v5.9M4.2 14.3l5.3-1.6M19.8 14.3l-5.3-1.6" />
+      </symbol>
+
+      <!-- Front defrost: windscreen arc with three rising heat waves. -->
+      <symbol id="icon-defrost-front" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 19.5c0-4 1.4-7.5 3.2-9.2h10.6c1.8 1.7 3.2 5.2 3.2 9.2" />
+        <path d="M8 8c.9-.8.9-1.9 0-2.7S7.1 3.4 8 2.6" />
+        <path d="M12 8c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
+        <path d="M16 8c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
+      </symbol>
+
+      <!-- Rear defrost: same shell, plus the grid lines of the heated element. -->
+      <symbol id="icon-defrost-rear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 19.5c0-4 1.4-7.5 3.2-9.2h10.6c1.8 1.7 3.2 5.2 3.2 9.2" />
+        <path d="M6.2 14h11.6M5.4 17h13.2" />
+        <path d="M9.5 7.6c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
+        <path d="M14.5 7.6c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
+      </symbol>
+
+      <symbol id="icon-fan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="1.8" />
+        <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2z" />
+        <path d="M13.8 12c3 0 5.2.8 5.2 2.6 0 1.5-1.6 2.3-3 1.4-1.2-.8-2.2-2.3-2.2-4z" />
+        <path d="M10.2 12c0 3-.8 5.2-2.6 5.2-1.5 0-2.3-1.6-1.4-3 .8-1.2 2.3-2.2 4-2.2z" />
+        <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
+      </symbol>
+
+      <symbol id="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 20.5V6.8L14 3.5v17z" />
+        <path d="M14 20.5h5.5V11L14 6.8" />
+        <circle cx="11" cy="12" r="1" />
+      </symbol>
+
+      <symbol id="icon-hood" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2.5 15.5h19" />
+        <path d="M4 15.5c1-5 4.2-8 8-8s7 3 8 8" />
+        <path d="M12 7.5v-3" />
+      </symbol>
+
+      <symbol id="icon-trunk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 18.5v-6l4-5h9l4 5v6" />
+        <path d="M3.5 12.5h17" />
+        <path d="M10 15.5h4" />
+      </symbol>
+
+      <symbol id="icon-tire" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5.5" y="3" width="13" height="18" rx="5" />
+        <path d="M9 7.5v9M12 6.5v11M15 7.5v9" />
+      </symbol>
+    </defs>
+  </svg>
+
   <!-- ============================= LOCK / PASSWORD GATE ============================= -->
   <div id="lock-overlay" class="lock-overlay" aria-hidden="false">
     <div class="lock-card">
-      <div class="lock-logo">⚡</div>
+      <svg class="lock-logo" aria-hidden="true"><use href="#icon-bolt" /></svg>
       <h1>PHEV Dashboard</h1>
       <p id="lock-sub" class="lock-sub">Enter your dashboard passphrase</p>
       <form id="pw-form" autocomplete="off">
@@ -78,9 +198,15 @@
         <p id="veh-updated" class="veh-updated">Waiting for data…</p>
       </div>
       <div class="header-actions">
-        <button id="btn-refresh" class="icon-btn" title="Refresh live status" aria-label="Refresh live status">🔄</button>
-        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">⚙️</button>
-        <button id="btn-logout" class="icon-btn" title="Log out" aria-label="Log out">⏻</button>
+        <button id="btn-refresh" class="icon-btn" title="Refresh live status" aria-label="Refresh live status">
+          <svg aria-hidden="true"><use href="#icon-refresh" /></svg>
+        </button>
+        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">
+          <svg aria-hidden="true"><use href="#icon-gear" /></svg>
+        </button>
+        <button id="btn-logout" class="icon-btn" title="Log out" aria-label="Log out">
+          <svg aria-hidden="true"><use href="#icon-power" /></svg>
+        </button>
       </div>
     </header>
 
@@ -108,27 +234,91 @@
 
     <!-- Warnings (hidden unless something is actually wrong) -->
     <section class="panel panel-warn" id="warnings-panel" hidden>
-      <h2 class="panel-title">⚠️ Active warnings</h2>
+      <h2 class="panel-title">Active warnings</h2>
       <div class="warnings" id="warnings"></div>
+    </section>
+
+    <!-- ===================== CLIMATE & COMFORT ===================== -->
+    <section class="panel climate-panel" id="climate-panel">
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-fan" /></svg>
+        Climate &amp; comfort
+      </h2>
+
+      <div class="duration-row">
+        <span class="duration-label">Run for</span>
+        <div class="duration-select" id="duration-select" role="group" aria-label="Command duration">
+          <button type="button" class="duration-opt" data-minutes="5">5m</button>
+          <button type="button" class="duration-opt active" data-minutes="10">10m</button>
+          <button type="button" class="duration-opt" data-minutes="20">20m</button>
+          <button type="button" class="duration-opt" data-minutes="30">30m</button>
+        </div>
+      </div>
+
+      <button type="button" class="climate-master hvac-action" data-action="climate">
+        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+        Start climate
+      </button>
+
+      <!-- Seat heaters, laid out where the seats actually are. -->
+      <div class="seat-diagram" role="group" aria-label="Seat heaters">
+        <div class="car-outline" aria-hidden="true"></div>
+        <div class="seat-grid">
+          <button type="button" class="seat-btn hvac-action" data-action="seat_fl" aria-label="Front left seat heater">
+            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
+            <span class="seat-pos">Front L</span>
+          </button>
+          <button type="button" class="seat-btn hvac-action" data-action="seat_fr" aria-label="Front right seat heater">
+            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
+            <span class="seat-pos">Front R</span>
+          </button>
+          <button type="button" class="seat-btn hvac-action" data-action="seat_rl" aria-label="Rear left seat heater">
+            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
+            <span class="seat-pos">Rear L</span>
+          </button>
+          <button type="button" class="seat-btn hvac-action" data-action="seat_rr" aria-label="Rear right seat heater">
+            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
+            <span class="seat-pos">Rear R</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="hvac-row">
+        <button type="button" class="hvac-btn hvac-action" data-action="steering_heat">
+          <svg aria-hidden="true"><use href="#icon-steering" /></svg> Wheel heat
+        </button>
+        <button type="button" class="hvac-btn hvac-action" data-action="defrost_front">
+          <svg aria-hidden="true"><use href="#icon-defrost-front" /></svg> Front defrost
+        </button>
+        <button type="button" class="hvac-btn hvac-action" data-action="defrost_rear">
+          <svg aria-hidden="true"><use href="#icon-defrost-rear" /></svg> Rear defrost
+        </button>
+      </div>
     </section>
 
     <!-- Doors & lights -->
     <section class="panel">
-      <h2 class="panel-title">Doors &amp; lights</h2>
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-door" /></svg>
+        Doors &amp; lights
+      </h2>
       <div class="doors" id="doors">
-        <div class="door" data-door="front_left"><span class="door-icon">🚪</span><span class="door-name">Front L</span><span class="door-state">—</span></div>
-        <div class="door" data-door="front_right"><span class="door-icon">🚪</span><span class="door-name">Front R</span><span class="door-state">—</span></div>
-        <div class="door" data-door="rear_left"><span class="door-icon">🚪</span><span class="door-name">Rear L</span><span class="door-state">—</span></div>
-        <div class="door" data-door="rear_right"><span class="door-icon">🚪</span><span class="door-name">Rear R</span><span class="door-state">—</span></div>
-        <div class="door" data-door="hood"><span class="door-icon">🛠️</span><span class="door-name">Hood</span><span class="door-state">—</span></div>
-        <div class="door" data-door="trunk"><span class="door-icon">🎒</span><span class="door-name">Trunk</span><span class="door-state">—</span></div>
-        <div class="door" data-door="headlights"><span class="door-icon">💡</span><span class="door-name">Lights</span><span class="door-state">—</span></div>
+        <div class="door" data-door="front_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front L</span><span class="door-state">—</span></div>
+        <div class="door" data-door="front_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front R</span><span class="door-state">—</span></div>
+        <div class="door" data-door="rear_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear L</span><span class="door-state">—</span></div>
+        <div class="door" data-door="rear_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear R</span><span class="door-state">—</span></div>
+        <div class="door" data-door="hood"><svg aria-hidden="true"><use href="#icon-hood" /></svg><span class="door-name">Hood</span><span class="door-state">—</span></div>
+        <div class="door" data-door="trunk"><svg aria-hidden="true"><use href="#icon-trunk" /></svg><span class="door-name">Trunk</span><span class="door-state">—</span></div>
+        <div class="door" data-door="headlights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span class="door-name">Lights</span><span class="door-state">—</span></div>
       </div>
     </section>
 
     <!-- Tire pressure -->
     <section class="panel">
-      <h2 class="panel-title">Tire pressure <span class="panel-unit">(bar)</span></h2>
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-tire" /></svg>
+        Tire pressure <span class="panel-unit">(bar)</span>
+      </h2>
       <div class="tires" id="tires">
         <div class="tire" data-tire="front_left"><span class="tire-pos">Front L</span><span class="tire-value" data-tire-field="front_left">—</span></div>
         <div class="tire" data-tire="front_right"><span class="tire-pos">Front R</span><span class="tire-value" data-tire-field="front_right">—</span></div>
@@ -139,14 +329,16 @@
 
     <!-- Commands -->
     <section class="panel">
-      <h2 class="panel-title">Remote commands</h2>
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-lock" /></svg>
+        Remote commands
+      </h2>
       <div class="commands" id="commands">
-        <button class="cmd-btn" data-action="lock">🔒 Lock</button>
-        <button class="cmd-btn" data-action="unlock">🔓 Unlock</button>
-        <button class="cmd-btn" data-action="horn">📣 Horn</button>
-        <button class="cmd-btn" data-action="lights">💡 Lights</button>
-        <button class="cmd-btn" data-action="locate">📍 Locate</button>
-        <button class="cmd-btn cmd-disabled" data-action="defrost" disabled title="Not available yet">❄️ Defrost (coming soon)</button>
+        <button class="cmd-btn" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg> Lock</button>
+        <button class="cmd-btn" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg> Unlock</button>
+        <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg> Horn</button>
+        <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg> Lights</button>
+        <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg> Locate</button>
       </div>
     </section>
 

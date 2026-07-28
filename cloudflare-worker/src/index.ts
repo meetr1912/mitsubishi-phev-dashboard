@@ -31,8 +31,28 @@ const EP_USER_INFO = "/user/v1/users/email/"; // + encodeURIComponent(email)
 const EP_SERVER_NONCE = "/oauth/v3/remoteOperation";
 const EP_PIN_TOKEN = "/oauth/v3/remoteOperation/pin";
 const EP_PERFORM_RO = "/avi/v3/remoteOperation";
+const EP_RO_STATUS = "/avi/v1/remoteOperation/vehicles/{vin}/events/{eventId}";
+const EP_PARENTAL_ALERT = "/avi/v1/vehicles/{vin}/parentalAlert";
 const EP_VEHICLE_STATE = "/avi/v1/vehicles/{vin}/vehiclestate";
 const EP_VEHICLE_HEALTH = "/avi/v1/vehicles/{vin}/vehicleStatus";
+
+/**
+ * Read-only settings groups, all served by the single parentalAlert template
+ * with a different ?operation= value. Confirmed from res/raw/environment:
+ * getchargingcontrol / getchargingcontrolscheduler / getclimateschedules /
+ * getclimatecontrol / getcurfews / getgeofences / getspeedalert /
+ * getprivacymode all resolve to this same path.
+ */
+const SETTINGS_OPERATIONS = new Set([
+  "remoteAC",
+  "climateControl",
+  "chargingControl",
+  "chargingControl2",
+  "curfew",
+  "geofence",
+  "speedAlert",
+  "privacyMode",
+]);
 
 /** action (from dashboard) -> Aeris "operation" field. */
 const OPERATION_MAP: Record<string, string> = {
@@ -42,6 +62,43 @@ const OPERATION_MAP: Record<string, string> = {
   lights: "lights",
   locate: "locate",
 };
+
+/**
+ * Climate-family actions — all dispatched as operation="remoteAC" with a
+ * per-action hvacSettings field, over the SAME REST /avi/v3/remoteOperation
+ * endpoint as the simple commands above. CONFIRMED working live (2026-07-28):
+ * a real request with frontLeftSeatControl/steeringHeaterControl/
+ * frontDefrostMode all set to their "on" value returned
+ * {"status":"Started"} from the real backend. No MQTT needed — the earlier
+ * static-analysis conclusion that hvacSettings was MQTT-only was wrong.
+ *
+ * on/off values per HVACOption.java: seats use HEATER_ON/HEATER_OFF,
+ * defrost + steering wheel use TURN_ON/TURN_OFF.
+ */
+const HVAC_ACTIONS: Record<string, { field?: string; onValue?: string; offValue?: string }> = {
+  climate: {},
+  seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_rr: { field: "rearRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  steering_heat: { field: "steeringHeaterControl", onValue: "TURN_ON", offValue: "TURN_OFF" },
+  defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
+  defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
+};
+
+const DEFAULT_HVAC_MINUTES = 10;
+const MAX_HVAC_MINUTES = 30;
+
+function buildHvacExtra(action: string, minutes: number): Record<string, unknown> {
+  const cfg = HVAC_ACTIONS[action] ?? {};
+  const hvacSettings: Record<string, unknown> = {
+    fanMode: "AUTO",
+    operationTime: minutes,
+    checkNumber: 0,
+  };
+  if (cfg.field && cfg.onValue) hvacSettings[cfg.field] = cfg.onValue;
+  return { hvacSettings };
+}
 
 // ---------------------------------------------------------------------------
 // Env — the four secrets set via `wrangler secret put ...`
@@ -300,6 +357,87 @@ async function performOperation(
   }
 }
 
+/**
+ * Poll a submitted operation to a terminal outcome.
+ *
+ * GET /avi/v1/remoteOperation/vehicles/{vin}/events/{eventId} — path confirmed
+ * from res/raw/environment (getrostatus.path). Response fields confirmed from
+ * the GetROStatus call class (p331s.C9333a): eventId, vin, status, reasonCode,
+ * operationType, errorLabel.
+ *
+ * Terminal-state classification mirrors VehicleOperationHttp.m3189x:
+ *   successful | success | inqueue  -> succeeded
+ *   failed | failure                -> failed
+ *   MessageDelivered                -> succeeded (the vehicle ACKed the message;
+ *                                      the app treats this as done for the
+ *                                      operations it applies to)
+ * Anything else is still in flight, so keep polling until the deadline.
+ */
+const POLL_INTERVAL_MS = 5000;
+const POLL_TIMEOUT_MS = 45000;
+
+interface EventOutcome {
+  outcome: "succeeded" | "failed" | "timeout";
+  status: string | null;
+  reasonCode: string | null;
+  errorLabel: string | null;
+  polls: number;
+}
+
+async function pollEvent(accessToken: string, vin: string, eventId: string): Promise<EventOutcome> {
+  const url = BASE_URL + EP_RO_STATUS.replace("{vin}", encodeURIComponent(vin)).replace("{eventId}", encodeURIComponent(eventId));
+  const headers = sharedHeaders(`Bearer ${accessToken}`);
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+
+  let last: EventOutcome = { outcome: "timeout", status: null, reasonCode: null, errorLabel: null, polls: 0 };
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    last.polls++;
+
+    const res = await fetch(url, { headers });
+    if (!res.ok) continue;
+
+    const data = (await res.json().catch(() => null)) as {
+      status?: string;
+      reasonCode?: string;
+      errorLabel?: string;
+    } | null;
+    if (!data?.status) continue;
+
+    last.status = data.status;
+    last.reasonCode = data.reasonCode ?? null;
+    last.errorLabel = data.errorLabel ?? null;
+
+    const s = data.status.toLowerCase();
+    if (s === "successful" || s === "success" || s === "inqueue" || s === "messagedelivered") {
+      return { ...last, outcome: "succeeded" };
+    }
+    if (s === "failed" || s === "failure") {
+      return { ...last, outcome: "failed" };
+    }
+  }
+  return last;
+}
+
+/** Full command flow: login -> VIN -> PIN token -> submit -> poll to outcome. */
+async function runCommand(
+  env: Env,
+  operation: string,
+  extra?: Record<string, unknown>,
+): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
+  const { accessToken } = await login(env);
+  const vin = await getVin(env, accessToken);
+  const pinToken = await verifyPin(env, accessToken, vin);
+  const submitted = await performOperation(env, accessToken, vin, pinToken, operation, extra);
+
+  const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
+  if (typeof eventId !== "string" || !eventId) {
+    return { eventId: null, submitted, event: null };
+  }
+  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
+}
+
 async function safeText(res: Response): Promise<string> {
   try {
     return (await res.text()).slice(0, 500);
@@ -520,7 +658,8 @@ export default {
     const isCommand = url.pathname === "/command" && request.method === "POST";
     const isStatus = url.pathname === "/status" && request.method === "GET";
     const isMqttDiscover = url.pathname === "/mqtt-discover" && request.method === "GET";
-    if (!isCommand && !isStatus && !isMqttDiscover) {
+    const isSettings = url.pathname === "/settings" && request.method === "GET";
+    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -536,6 +675,28 @@ export default {
         const vin = await getVin(env, accessToken);
         const latest = await fetchLiveStatus(env, accessToken, vin);
         return json({ success: true, latest });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    if (isSettings) {
+      const operation = url.searchParams.get("operation") ?? "remoteAC";
+      if (!SETTINGS_OPERATIONS.has(operation)) {
+        return json({ success: false, error: `Unknown settings operation '${operation}'` }, 400);
+      }
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const res = await fetch(
+          `${BASE_URL}${EP_PARENTAL_ALERT.replace("{vin}", encodeURIComponent(vin))}?operation=${encodeURIComponent(operation)}`,
+          { headers: sharedHeaders(`Bearer ${accessToken}`) },
+        );
+        if (!res.ok) {
+          return json({ success: false, error: `Settings read failed: HTTP ${res.status} ${await safeText(res)}` }, 502);
+        }
+        return json({ success: true, operation, settings: await res.json() });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -566,13 +727,11 @@ export default {
 
     // --- Parse body ---
     let action: unknown;
-    let rawOperation: unknown;
-    let rawExtra: unknown;
+    let rawMinutes: unknown;
     try {
-      const body = (await request.json()) as { action?: unknown; operation?: unknown; extra?: unknown };
+      const body = (await request.json()) as { action?: unknown; minutes?: unknown };
       action = body.action;
-      rawOperation = body.operation;
-      rawExtra = body.extra;
+      rawMinutes = body.minutes;
     } catch {
       return json({ success: false, error: "Invalid JSON body" }, 400);
     }
@@ -580,47 +739,40 @@ export default {
       return json({ success: false, error: "Missing 'action'" }, 400);
     }
 
-    // --- TEMPORARY diagnostic: send an arbitrary operation + extra body
-    // straight through the confirmed-working REST /avi/v3/remoteOperation
-    // endpoint (same one lock/unlock/horn/lights/locate use), returning the
-    // RAW server response. Lets us empirically probe which of the ~29 known
-    // operation names (RemoteOperationConstants.OperationName) work over REST
-    // without a redeploy per attempt. Body: {"action":"raw_test",
-    // "operation":"remoteAC","extra":{"hvacSettings":{...}}}. Remove once the
-    // climate/full-operation-list question is resolved.
-    if (action === "raw_test") {
-      try {
-        const op = typeof rawOperation === "string" ? rawOperation : "";
-        if (!op) return json({ success: false, error: "raw_test requires 'operation'" }, 400);
-        const extra =
-          rawExtra && typeof rawExtra === "object" ? (rawExtra as Record<string, unknown>) : undefined;
-        const { accessToken } = await login(env);
-        const vin = await getVin(env, accessToken);
-        const pinToken = await verifyPin(env, accessToken, vin);
-        const result = await performOperation(env, accessToken, vin, pinToken, op, extra);
-        return json({ success: true, raw: result });
-      } catch (err) {
-        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
-        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
-      }
-    }
-
-    // --- Unimplemented (climate family / anything not mapped) -> 501 ---
-    const operation = OPERATION_MAP[action];
+    // --- HVAC-family actions (climate, seat heat x4, steering wheel heat,
+    // front/rear defrost) — CONFIRMED working live (2026-07-28) over the same
+    // REST /avi/v3/remoteOperation endpoint as the simple commands, operation
+    // "remoteAC" with a per-action hvacSettings field. Duration is
+    // caller-supplied (dashboard exposes a minutes selector), clamped to a
+    // sane range so nothing runs unbounded.
+    const isHvac = Object.prototype.hasOwnProperty.call(HVAC_ACTIONS, action);
+    const operation = isHvac ? "remoteAC" : OPERATION_MAP[action];
     if (!operation) {
-      return json(
-        { success: false, error: "Not implemented yet — requires MQTT command channel (see README)." },
-        501,
-      );
+      return json({ success: false, error: `Unknown action '${action}'` }, 400);
     }
 
-    // --- Execute the full flow ---
+    const requested = typeof rawMinutes === "number" ? rawMinutes : DEFAULT_HVAC_MINUTES;
+    const minutes = Math.max(1, Math.min(MAX_HVAC_MINUTES, Math.round(requested)));
+    const extra = isHvac ? buildHvacExtra(action, minutes) : undefined;
+
     try {
-      const { accessToken } = await login(env);
-      const vin = await getVin(env, accessToken);
-      const pinToken = await verifyPin(env, accessToken, vin);
-      await performOperation(env, accessToken, vin, pinToken, operation);
-      return json({ success: true, message: `Command '${action}' sent to vehicle.` });
+      const { eventId, submitted, event } = await runCommand(env, operation, extra);
+
+      // No eventId means the backend answered synchronously (some operations do)
+      // — treat the accepted submission as the result rather than inventing one.
+      if (!event) {
+        return json({ success: true, action, message: `'${action}' submitted.`, eventId, raw: submitted });
+      }
+
+      const duration = isHvac ? ` for ${minutes} min` : "";
+      const message =
+        event.outcome === "succeeded"
+          ? `'${action}' confirmed by vehicle${duration}.`
+          : event.outcome === "failed"
+            ? `'${action}' rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
+            : `'${action}' sent, but the vehicle did not report back in time.`;
+
+      return json({ success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event });
     } catch (err) {
       if (err instanceof ApiError) {
         return json({ success: false, error: err.message }, err.status);

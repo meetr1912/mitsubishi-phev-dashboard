@@ -26,6 +26,12 @@ from .const import (
     EP_MILEAGE_YEARLY,
     EP_CHARGING_HISTORY,
     EP_CHARGING_COST,
+    EP_TRIAL_EXPIRY,
+    EP_PURCHASABLE_PACKAGES_SERVICE,
+    EP_PURCHASABLE_PACKAGES_MOBILITY,
+    EP_VEHICLE_SUBSCRIPTIONS_ACTIVE,
+    EP_VEHICLE_SUBSCRIPTIONS_ALL,
+    EP_AMS_CLIMATE_SCHEDULE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -189,3 +195,35 @@ class MitsubishiNAClient:
             EP_CHARGING_COST.format(vehicle_id=vehicle_id),
             params={"year": year, "month": month, "timezone": timezone, "baseCost": base_cost},
         )
+
+    async def async_get_trial_expiry(self, vin: str) -> dict | None:
+        return await self._get(EP_TRIAL_EXPIRY.format(vin=vin))
+
+    async def async_get_climate_schedule(self, vin: str) -> dict | None:
+        """Current climate schedule list — read-only, safe to call anytime."""
+        return await self._get(EP_AMS_CLIMATE_SCHEDULE.format(vin=vin))
+
+    async def async_get_purchasable_packages(
+        self, vin: str, category: str = "SERVICE", check_promo_eligibility: bool = True,
+        hide_regular_for_promo: bool = False,
+    ) -> dict | None:
+        """Browse the store catalog for this vehicle — read-only, no card needed.
+
+        category: "SERVICE" or "MOBILITY_SERVICE". Response includes
+        daysLeftForPromo per bundle when a promo is currently active.
+        """
+        path = (
+            EP_PURCHASABLE_PACKAGES_MOBILITY if category == "MOBILITY_SERVICE"
+            else EP_PURCHASABLE_PACKAGES_SERVICE
+        )
+        return await self._get(
+            path.format(vin=vin),
+            params={
+                "checkPromoEligibility": str(check_promo_eligibility).lower(),
+                "hideRegularForPromo": str(hide_regular_for_promo).lower(),
+            },
+        )
+
+    async def async_get_subscriptions(self, vin: str, active_only: bool = True) -> dict | None:
+        path = EP_VEHICLE_SUBSCRIPTIONS_ACTIVE if active_only else EP_VEHICLE_SUBSCRIPTIONS_ALL
+        return await self._get(path.format(vin=vin))

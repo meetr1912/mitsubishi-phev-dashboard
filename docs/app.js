@@ -70,7 +70,9 @@
     var fill = document.getElementById("battery-fill");
     if (fill && l.battery_pct != null) {
       fill.style.width = Math.max(0, Math.min(100, l.battery_pct)) + "%";
-      fill.style.background = l.battery_pct <= 15 ? "var(--danger)" : "var(--accent)";
+      fill.style.background = l.battery_pct <= 15
+        ? "var(--danger)"
+        : "linear-gradient(90deg, var(--ice-dim), var(--ice))";
     }
     setField("ev_range", rangeStr(l.ev_range_km));
     setField("gas_range", rangeStr(l.gas_range_km));
@@ -107,12 +109,12 @@
 
   // ---- active warnings (panel hidden unless something is strictly true) ----
   var WARNING_DEFS = [
-    { key: "brake", label: "Brake", icon: "🛑" },
-    { key: "engine_oil", label: "Engine oil", icon: "🛢️" },
-    { key: "tire_pressure", label: "Tire pressure", icon: "🛞" },
-    { key: "mil", label: "Check engine", icon: "🔧" },
-    { key: "abs", label: "ABS", icon: "🅰️" },
-    { key: "airbag", label: "Airbag", icon: "💥" }
+    { key: "brake", label: "Brake" },
+    { key: "engine_oil", label: "Engine oil" },
+    { key: "tire_pressure", label: "Tire pressure" },
+    { key: "mil", label: "Check engine" },
+    { key: "abs", label: "ABS" },
+    { key: "airbag", label: "Airbag" }
   ];
   function renderWarnings(warnings) {
     var panel = document.getElementById("warnings-panel");
@@ -125,14 +127,7 @@
     active.forEach(function (d) {
       var chip = document.createElement("div");
       chip.className = "warning-chip";
-      var icon = document.createElement("span");
-      icon.className = "warning-icon";
-      icon.textContent = d.icon;
-      var label = document.createElement("span");
-      label.className = "warning-label";
-      label.textContent = d.label;
-      chip.appendChild(icon);
-      chip.appendChild(label);
+      chip.textContent = d.label;
       container.appendChild(chip);
     });
     panel.hidden = false;
@@ -176,75 +171,122 @@
   function setText(sel, txt) { var el = $(sel); if (el) el.textContent = txt; }
 
   // ---- commands ----
-  function setBtnLoading(btn, loading) {
-    if (loading) {
-      btn.dataset.label = btn.dataset.label || btn.textContent;
-      btn.disabled = true;
-      btn.classList.add("loading");
-      btn.innerHTML = '<span class="spinner"></span> Sending…';
-    } else {
-      btn.disabled = false;
-      btn.classList.remove("loading");
-      if (btn.dataset.label) btn.textContent = btn.dataset.label;
-    }
+  // The Worker polls the vehicle's event endpoint before replying, so a call
+  // can legitimately take ~45s. Buttons keep their icon and label throughout
+  // (no innerHTML swap) and just carry a pending class.
+  function setBtnBusy(btn, busy, busyClass) {
+    btn.disabled = busy;
+    btn.classList.toggle(busyClass, busy);
   }
 
-  async function sendCommand(action, btn) {
-    if (CONFIG.WORKER_URL.indexOf("REPLACE-ME") !== -1) {
-      toast("Set CONFIG.WORKER_URL in app.js first.", "error");
-      return;
-    }
+  function requireKey() {
     var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
     if (!key) {
       toast("Set your Dashboard command key in Settings.", "error");
       if (window.PHEV.openSettings) window.PHEV.openSettings();
-      return;
+      return null;
     }
-    setBtnLoading(btn, true);
+    return key;
+  }
+
+  async function postCommand(action, minutes) {
+    var key = requireKey();
+    if (!key) return null;
+    var payload = { action: action };
+    if (minutes) payload.minutes = minutes;
+
+    var res = await fetch(CONFIG.WORKER_URL + "/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Dashboard-Key": key },
+      body: JSON.stringify(payload)
+    });
+    var body = {};
+    try { body = await res.json(); } catch (e) { /* non-JSON */ }
+    return { ok: res.ok, status: res.status, body: body };
+  }
+
+  function reportCommand(action, result) {
+    if (!result) return false;
+    var body = result.body || {};
+    if (result.ok && body.success) {
+      toast(body.message || (titleize(action) + " sent."), body.outcome === "timeout" ? "info" : "success");
+      return body.outcome !== "timeout";
+    }
+    toast(body.error || body.message || ("Failed (HTTP " + result.status + ")"), "error");
+    return false;
+  }
+
+  async function sendCommand(action, btn) {
+    setBtnBusy(btn, true, "loading");
     try {
-      var res = await fetch(CONFIG.WORKER_URL + "/command", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Dashboard-Key": key
-        },
-        body: JSON.stringify({ action: action })
-      });
-      var body = {};
-      try { body = await res.json(); } catch (e) { /* non-JSON */ }
-      if (res.ok && body.success) {
-        toast(body.message || (titleize(action) + " sent."), "success");
-      } else {
-        toast(body.error || ("Failed (HTTP " + res.status + ")"), "error");
-      }
+      reportCommand(action, await postCommand(action));
     } catch (e) {
       toast("Network error: " + e.message, "error");
     } finally {
-      setBtnLoading(btn, false);
+      setBtnBusy(btn, false, "loading");
     }
   }
 
   document.getElementById("commands").addEventListener("click", function (e) {
     var btn = e.target.closest(".cmd-btn");
     if (!btn || btn.disabled) return;
-    var action = btn.dataset.action;
-    if (!action || action === "defrost") return; // defrost is honestly disabled
-    sendCommand(action, btn);
+    if (btn.dataset.action) sendCommand(btn.dataset.action, btn);
   });
+
+  // ---- climate & comfort ----
+  // Duration is a client-side choice sent as `minutes`; the Worker clamps it to
+  // 1..30 regardless, so a tampered value can't leave the car running.
+  var selectedMinutes = 10;
+  var durationSelect = document.getElementById("duration-select");
+  if (durationSelect) {
+    durationSelect.addEventListener("click", function (e) {
+      var opt = e.target.closest(".duration-opt");
+      if (!opt) return;
+      selectedMinutes = parseInt(opt.dataset.minutes, 10) || 10;
+      Array.prototype.forEach.call(durationSelect.children, function (c) {
+        c.classList.toggle("active", c === opt);
+      });
+    });
+  }
+
+  // "Active" is optimistic: the backend has no read-back for seat/wheel heat,
+  // so a confirmed command lights the button for its own duration and then
+  // clears itself. It reflects what we asked for, not a sensor reading.
+  function markActiveFor(btn, minutes) {
+    btn.classList.add("active");
+    clearTimeout(btn._activeTimer);
+    btn._activeTimer = setTimeout(function () {
+      btn.classList.remove("active");
+    }, minutes * 60 * 1000);
+  }
+
+  async function sendHvac(action, btn) {
+    var minutes = selectedMinutes;
+    setBtnBusy(btn, true, "sending");
+    try {
+      var result = await postCommand(action, minutes);
+      if (reportCommand(action, result)) markActiveFor(btn, minutes);
+    } catch (e) {
+      toast("Network error: " + e.message, "error");
+    } finally {
+      setBtnBusy(btn, false, "sending");
+    }
+  }
+
+  var climatePanel = document.getElementById("climate-panel");
+  if (climatePanel) {
+    climatePanel.addEventListener("click", function (e) {
+      var btn = e.target.closest(".hvac-action");
+      if (!btn || btn.disabled) return;
+      sendHvac(btn.dataset.action, btn);
+    });
+  }
 
   // ---- manual "refresh now" (live status, on demand only — no auto-polling,
   // to avoid repeatedly waking the vehicle's telematics unit) ----
   async function refreshNow(btn) {
-    if (CONFIG.WORKER_URL.indexOf("REPLACE-ME") !== -1) {
-      toast("Set CONFIG.WORKER_URL in app.js first.", "error");
-      return;
-    }
-    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
-    if (!key) {
-      toast("Set your Dashboard command key in Settings.", "error");
-      if (window.PHEV.openSettings) window.PHEV.openSettings();
-      return;
-    }
+    var key = requireKey();
+    if (!key) return;
     btn.disabled = true;
     btn.classList.add("spinning");
     try {
