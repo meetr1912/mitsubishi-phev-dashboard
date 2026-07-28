@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#05070d" />
+  <meta name="theme-color" content="#0a0a0b" />
   <title>PHEV Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -154,6 +154,19 @@
         <rect x="5.5" y="3" width="13" height="18" rx="5" />
         <path d="M9 7.5v9M12 6.5v11M15 7.5v9" />
       </symbol>
+
+      <!-- Gauge / speedometer — Status tab. -->
+      <symbol id="icon-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 17a8.5 8.5 0 0 1 17 0" />
+        <path d="M12 17l4.2-4.2" />
+        <circle cx="12" cy="17" r="1.1" />
+      </symbol>
+
+      <!-- Line chart — History tab. -->
+      <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 4v15a1 1 0 0 0 1 1h15" />
+        <path d="M7.5 14.5 11 10l3 2.4 4.5-5.4" />
+      </symbol>
     </defs>
   </svg>
 
@@ -210,7 +223,10 @@
       </div>
     </header>
 
-    <!-- 3D hero -->
+    <!-- =============== STATUS TAB =============== -->
+    <div class="tab-view is-active" id="tab-status" data-tab="status" role="tabpanel" aria-label="Status">
+
+      <!-- 3D hero -->
     <section class="hero">
       <canvas id="car-canvas" aria-label="3D vehicle status visualization"></canvas>
       <div id="car-fallback" class="car-fallback" hidden>3D view unavailable on this device.</div>
@@ -238,15 +254,26 @@
       <div class="warnings" id="warnings"></div>
     </section>
 
-    <!-- ===================== CLIMATE & COMFORT ===================== -->
+      <footer class="app-footer">
+        <span id="veh-vin">—</span>
+      </footer>
+    </div>
+
+    <!-- =============== CLIMATE TAB =============== -->
+    <div class="tab-view" id="tab-climate" data-tab="climate" role="tabpanel" aria-label="Climate">
+
+    <!-- ===================== CLIMATE & COMFORT =====================
+         Comfort zones are LOCAL toggles (armed = pending selection). Nothing is
+         sent until "Start climate" submits the whole config in ONE request:
+         { action:"climate", minutes, temperatureC, options:[...] }. -->
     <section class="panel climate-panel" id="climate-panel">
       <h2 class="panel-title">
         <svg class="pt-icon" aria-hidden="true"><use href="#icon-fan" /></svg>
         Climate &amp; comfort
       </h2>
 
-      <div class="duration-row">
-        <span class="duration-label">Run for</span>
+      <div class="config-row">
+        <span class="config-label">Run for</span>
         <div class="duration-select" id="duration-select" role="group" aria-label="Command duration">
           <button type="button" class="duration-opt" data-minutes="5">5m</button>
           <button type="button" class="duration-opt active" data-minutes="10">10m</button>
@@ -255,28 +282,32 @@
         </div>
       </div>
 
-      <button type="button" class="climate-master hvac-action" data-action="climate">
-        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
-        Start climate
-      </button>
+      <div class="config-row config-row--divider">
+        <span class="config-label">Temperature</span>
+        <div class="temp-stepper" role="group" aria-label="Cabin temperature">
+          <button type="button" class="temp-step" data-temp-step="-1" aria-label="Lower temperature">−</button>
+          <span class="temp-value" id="temp-value" aria-live="polite">22°C</span>
+          <button type="button" class="temp-step" data-temp-step="1" aria-label="Raise temperature">+</button>
+        </div>
+      </div>
 
-      <!-- Seat heaters, laid out where the seats actually are. -->
+      <!-- Seat heaters, laid out where the seats actually are. Tap = arm (local). -->
       <div class="seat-diagram" role="group" aria-label="Seat heaters">
         <div class="car-outline" aria-hidden="true"></div>
         <div class="seat-grid">
-          <button type="button" class="seat-btn hvac-action" data-action="seat_fl" aria-label="Front left seat heater">
+          <button type="button" class="seat-btn comfort-toggle" data-option="seat_fl" aria-pressed="false" aria-label="Front left seat heater">
             <svg aria-hidden="true"><use href="#icon-seat" /></svg>
             <span class="seat-pos">Front L</span>
           </button>
-          <button type="button" class="seat-btn hvac-action" data-action="seat_fr" aria-label="Front right seat heater">
+          <button type="button" class="seat-btn comfort-toggle" data-option="seat_fr" aria-pressed="false" aria-label="Front right seat heater">
             <svg aria-hidden="true"><use href="#icon-seat" /></svg>
             <span class="seat-pos">Front R</span>
           </button>
-          <button type="button" class="seat-btn hvac-action" data-action="seat_rl" aria-label="Rear left seat heater">
+          <button type="button" class="seat-btn comfort-toggle" data-option="seat_rl" aria-pressed="false" aria-label="Rear left seat heater">
             <svg aria-hidden="true"><use href="#icon-seat" /></svg>
             <span class="seat-pos">Rear L</span>
           </button>
-          <button type="button" class="seat-btn hvac-action" data-action="seat_rr" aria-label="Rear right seat heater">
+          <button type="button" class="seat-btn comfort-toggle" data-option="seat_rr" aria-pressed="false" aria-label="Rear right seat heater">
             <svg aria-hidden="true"><use href="#icon-seat" /></svg>
             <span class="seat-pos">Rear R</span>
           </button>
@@ -284,17 +315,26 @@
       </div>
 
       <div class="hvac-row">
-        <button type="button" class="hvac-btn hvac-action" data-action="steering_heat">
+        <button type="button" class="hvac-btn comfort-toggle" data-option="steering_heat" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-steering" /></svg> Wheel heat
         </button>
-        <button type="button" class="hvac-btn hvac-action" data-action="defrost_front">
+        <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_front" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-defrost-front" /></svg> Front defrost
         </button>
-        <button type="button" class="hvac-btn hvac-action" data-action="defrost_rear">
+        <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_rear" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-defrost-rear" /></svg> Rear defrost
         </button>
       </div>
+
+      <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
+        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+        <span class="climate-master-label">Start climate</span>
+      </button>
     </section>
+    </div>
+
+    <!-- =============== CONTROLS TAB =============== -->
+    <div class="tab-view" id="tab-controls" data-tab="controls" role="tabpanel" aria-label="Controls">
 
     <!-- Doors & lights -->
     <section class="panel">
@@ -320,10 +360,10 @@
         Tire pressure <span class="panel-unit">(bar)</span>
       </h2>
       <div class="tires" id="tires">
-        <div class="tire" data-tire="front_left"><span class="tire-pos">Front L</span><span class="tire-value" data-tire-field="front_left">—</span></div>
-        <div class="tire" data-tire="front_right"><span class="tire-pos">Front R</span><span class="tire-value" data-tire-field="front_right">—</span></div>
-        <div class="tire" data-tire="rear_left"><span class="tire-pos">Rear L</span><span class="tire-value" data-tire-field="rear_left">—</span></div>
-        <div class="tire" data-tire="rear_right"><span class="tire-pos">Rear R</span><span class="tire-value" data-tire-field="rear_right">—</span></div>
+        <div class="tire" data-tire="front_left"><span class="tire-pos">Front L</span><span class="tire-read"><span class="tire-value" data-tire-field="front_left">—</span><span class="tire-unit">bar</span></span></div>
+        <div class="tire" data-tire="front_right"><span class="tire-pos">Front R</span><span class="tire-read"><span class="tire-value" data-tire-field="front_right">—</span><span class="tire-unit">bar</span></span></div>
+        <div class="tire" data-tire="rear_left"><span class="tire-pos">Rear L</span><span class="tire-read"><span class="tire-value" data-tire-field="rear_left">—</span><span class="tire-unit">bar</span></span></div>
+        <div class="tire" data-tire="rear_right"><span class="tire-pos">Rear R</span><span class="tire-read"><span class="tire-value" data-tire-field="rear_right">—</span><span class="tire-unit">bar</span></span></div>
       </div>
     </section>
 
@@ -341,6 +381,10 @@
         <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg> Locate</button>
       </div>
     </section>
+    </div>
+
+    <!-- =============== HISTORY TAB =============== -->
+    <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="History">
 
     <!-- Charts -->
     <section class="panel">
@@ -363,11 +407,28 @@
       <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
       <p class="chart-empty" id="empty-monthly" hidden>No history yet.</p>
     </section>
-
-    <footer class="app-footer">
-      <span id="veh-vin">—</span>
-    </footer>
+    </div>
   </main>
+
+  <!-- ============================= BOTTOM TAB BAR ============================= -->
+  <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
+    <button type="button" class="tab-btn active" data-tab="status" role="tab" aria-selected="true" aria-controls="tab-status">
+      <svg aria-hidden="true"><use href="#icon-gauge" /></svg>
+      <span>Status</span>
+    </button>
+    <button type="button" class="tab-btn" data-tab="climate" role="tab" aria-selected="false" aria-controls="tab-climate">
+      <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+      <span>Climate</span>
+    </button>
+    <button type="button" class="tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="tab-controls">
+      <svg aria-hidden="true"><use href="#icon-lock" /></svg>
+      <span>Controls</span>
+    </button>
+    <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history">
+      <svg aria-hidden="true"><use href="#icon-chart" /></svg>
+      <span>History</span>
+    </button>
+  </nav>
 
   <!-- Toast container -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
@@ -379,6 +440,7 @@
   <script src="crypto.js" defer></script>
   <script src="app.js" defer></script>
   <script src="charts.js" defer></script>
+  <script src="nav.js" defer></script>
 
   <!-- three-scene is an ES module (imports three) -->
   <script type="module" src="three-scene.js"></script>

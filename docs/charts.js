@@ -8,12 +8,13 @@
 
   var charts = { battery: null, odometer: null, daily: null, monthly: null };
 
-  // Mirrors the --ice / --ember pair in styles.css.
+  // Graphite + teal palette (matches :root in styles.css). No blue, and no
+  // ember here — ember (--heat) is reserved for cabin-heating controls only.
   var COLORS = {
-    accent: "#6fd6ff",
-    accent2: "#ff8a3d",
-    grid: "rgba(148,209,255,0.10)",
-    text: "#5c7086"
+    accent: "#4fd1b0",   // --accent (teal)
+    accent2: "#8ce8d0",  // --accent-soft (lighter teal, for the second series)
+    grid: "rgba(232,226,214,0.08)", // neutral graphite (matches --border)
+    text: "#a8a49b"      // --text-mid
   };
 
   function ready() { return typeof window.Chart !== "undefined"; }
@@ -73,7 +74,7 @@
           label: "Battery %",
           data: data,
           borderColor: COLORS.accent,
-          backgroundColor: "rgba(111,214,255,0.15)",
+          backgroundColor: "rgba(79,209,176,0.15)",
           fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -102,7 +103,7 @@
           label: "Odometer (km)",
           data: data,
           borderColor: COLORS.accent2,
-          backgroundColor: "rgba(255,138,61,0.12)",
+          backgroundColor: "rgba(140,232,208,0.12)",
           fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -131,7 +132,7 @@
         datasets: [{
           label: "Distance (km)",
           data: data,
-          backgroundColor: "rgba(255,138,61,0.55)",
+          backgroundColor: "rgba(140,232,208,0.45)",
           borderColor: COLORS.accent2,
           borderWidth: 1, borderRadius: 4
         }]
@@ -170,7 +171,7 @@
         datasets: [{
           label: "Distance (" + unit + ")",
           data: series,
-          backgroundColor: "rgba(111,214,255,0.55)",
+          backgroundColor: "rgba(79,209,176,0.5)",
           borderColor: COLORS.accent,
           borderWidth: 1, borderRadius: 4
         }]
@@ -191,6 +192,16 @@
     renderDaily((data.rollups && data.rollups.daily) || []);
     renderMonthly(data);
   }
+
+  // The History tab is display:none when these charts first initialise, so their
+  // canvases start at 0x0. The tab controller calls this the moment History is
+  // shown so each chart re-measures its now-visible container and draws at full
+  // size (belt-and-braces alongside Chart.js's own responsive ResizeObserver).
+  window.PHEV.resizeCharts = function () {
+    Object.keys(charts).forEach(function (name) {
+      if (charts[name]) { try { charts[name].resize(); } catch (e) { /* ignore */ } }
+    });
+  };
 
   window.PHEV.onData(renderAll);
 })();

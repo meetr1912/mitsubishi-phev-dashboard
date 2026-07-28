@@ -72,7 +72,7 @@
       fill.style.width = Math.max(0, Math.min(100, l.battery_pct)) + "%";
       fill.style.background = l.battery_pct <= 15
         ? "var(--danger)"
-        : "linear-gradient(90deg, var(--ice-dim), var(--ice))";
+        : "linear-gradient(90deg, var(--accent-dim), var(--accent))";
     }
     setField("ev_range", rangeStr(l.ev_range_km));
     setField("gas_range", rangeStr(l.gas_range_km));
@@ -93,6 +93,14 @@
     // tire pressure + active warnings
     renderTires(l.tire_pressure_bar);
     renderWarnings(l.warnings);
+
+    // First paint after unlock renders the cached snapshot; immediately pull one
+    // live status so the very first view is current without a manual refresh.
+    // Guarded so it fires exactly once (our own merge re-enters render()).
+    if (!autoRefreshed) {
+      autoRefreshed = true;
+      autoRefreshOnUnlock();
+    }
   }
 
   // ---- tire pressure (bar; missing -> "—") ----
@@ -103,7 +111,9 @@
       var el = document.querySelector('[data-tire-field="' + key + '"]');
       if (!el) return;
       var v = tp[key];
-      el.textContent = (v === null || v === undefined) ? "—" : v;
+      var num = (typeof v === "number") ? v : parseFloat(v);
+      // Fixed 1 decimal (2.2999999 -> "2.3"); non-numeric / missing -> "—".
+      el.textContent = (v === null || v === undefined || isNaN(num)) ? "—" : num.toFixed(1);
     });
   }
 
@@ -189,12 +199,11 @@
     return key;
   }
 
-  async function postCommand(action, minutes) {
+  // Single POST /command sender. Takes a fully-formed payload so both simple
+  // commands and the composite climate request go through one code path.
+  async function postCommandBody(payload) {
     var key = requireKey();
     if (!key) return null;
-    var payload = { action: action };
-    if (minutes) payload.minutes = minutes;
-
     var res = await fetch(CONFIG.WORKER_URL + "/command", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Dashboard-Key": key },
@@ -203,6 +212,10 @@
     var body = {};
     try { body = await res.json(); } catch (e) { /* non-JSON */ }
     return { ok: res.ok, status: res.status, body: body };
+  }
+
+  function postCommand(action) {
+    return postCommandBody({ action: action });
   }
 
   function reportCommand(action, result) {
@@ -234,75 +247,189 @@
   });
 
   // ---- climate & comfort ----
-  // Duration is a client-side choice sent as `minutes`; the Worker clamps it to
-  // 1..30 regardless, so a tampered value can't leave the car running.
+  // Comfort zones (seats, wheel, defrost), duration and temperature are all
+  // LOCAL selections — tapping them only changes UI state, no network. The one
+  // and only network call is "Start climate", which submits the whole config in
+  // a single request:  { action:"climate", minutes, temperatureC, options:[...] }.
+  // Unselected options are turned OFF server-side, so cabin state matches the UI.
+  // Until Start is pressed (or after any later change) the selection is *pending*
+  // (armed, outlined); only a confirmed start reads as *running* (filled + glow).
+  var VALID_OPTIONS = ["seat_fl", "seat_fr", "seat_rl", "seat_rr",
+                       "steering_heat", "defrost_front", "defrost_rear"];
+  // Provisional bounds. The car's real selectable range comes from its own
+  // posmap (a server-supplied {pos, cel, fah} table the Worker exposes on
+  // GET /config) and is a property of the vehicle, not a constant — 19..28 is
+  // just a sane default until that has been read back from the live account.
+  // Degrees are converted to the wire's position index Worker-side.
+  var TEMP_MIN = 19, TEMP_MAX = 28;
   var selectedMinutes = 10;
-  var durationSelect = document.getElementById("duration-select");
-  if (durationSelect) {
-    durationSelect.addEventListener("click", function (e) {
-      var opt = e.target.closest(".duration-opt");
-      if (!opt) return;
-      selectedMinutes = parseInt(opt.dataset.minutes, 10) || 10;
-      Array.prototype.forEach.call(durationSelect.children, function (c) {
-        c.classList.toggle("active", c === opt);
-      });
-    });
+  var selectedTempC = 22;
+  var selectedOptions = {};       // option string -> true
+  var climateRunning = false;     // true only after a confirmed Start
+
+  var climatePanel = document.getElementById("climate-panel");
+  var climateStartBtn = document.getElementById("climate-start");
+  var tempValueEl = document.getElementById("temp-value");
+
+  function comfortButtons() {
+    return climatePanel ? climatePanel.querySelectorAll(".comfort-toggle") : [];
+  }
+  function startLabel(txt) {
+    var lbl = climateStartBtn && climateStartBtn.querySelector(".climate-master-label");
+    if (lbl) lbl.textContent = txt;
+  }
+  function renderTemp() {
+    if (tempValueEl) tempValueEl.textContent = selectedTempC + "°C";
   }
 
-  // "Active" is optimistic: the backend has no read-back for seat/wheel heat,
-  // so a confirmed command lights the button for its own duration and then
-  // clears itself. It reflects what we asked for, not a sensor reading.
-  function markActiveFor(btn, minutes) {
-    btn.classList.add("active");
-    clearTimeout(btn._activeTimer);
-    btn._activeTimer = setTimeout(function () {
-      btn.classList.remove("active");
+  // A confirmed-running comfort zone stays lit for the chosen duration then
+  // clears itself — the backend has no read-back for comfort zones, so this
+  // reflects what we asked for, not a sensor reading.
+  function markRunningFor(btn, minutes) {
+    btn.classList.remove("armed");
+    btn.classList.add("running");
+    clearTimeout(btn._runTimer);
+    btn._runTimer = setTimeout(function () {
+      btn.classList.remove("running");
     }, minutes * 60 * 1000);
   }
 
-  async function sendHvac(action, btn) {
+  // Any config change after a start drops us back to pending: the car is running
+  // the OLD config, so nothing should keep claiming the new selection is live.
+  function markPending() {
+    if (!climateRunning) return;
+    climateRunning = false;
+    if (climateStartBtn) {
+      climateStartBtn.classList.remove("running");
+      clearTimeout(climateStartBtn._runTimer);
+    }
+    Array.prototype.forEach.call(comfortButtons(), function (b) {
+      clearTimeout(b._runTimer);
+      b.classList.remove("running");
+      // still-selected zones revert to armed (pending); deselected stay off
+      if (selectedOptions[b.dataset.option]) b.classList.add("armed");
+    });
+    startLabel("Start climate");
+  }
+
+  function toggleOption(btn) {
+    var opt = btn.dataset.option;
+    if (VALID_OPTIONS.indexOf(opt) === -1) return;
+    var on = !selectedOptions[opt];
+    if (on) { selectedOptions[opt] = true; } else { delete selectedOptions[opt]; }
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.remove("running");
+    btn.classList.toggle("armed", on);
+    markPending();
+  }
+
+  function selectDuration(opt) {
+    selectedMinutes = parseInt(opt.dataset.minutes, 10) || 10;
+    Array.prototype.forEach.call(opt.parentNode.children, function (c) {
+      c.classList.toggle("active", c === opt);
+    });
+    markPending();
+  }
+
+  function stepTemp(delta) {
+    var next = selectedTempC + delta;
+    if (next < TEMP_MIN) next = TEMP_MIN;
+    if (next > TEMP_MAX) next = TEMP_MAX;
+    if (next === selectedTempC) return;
+    selectedTempC = next;
+    renderTemp();
+    markPending();
+  }
+
+  // The single submit. Builds the composite payload and sends exactly one
+  // request; the button is disabled for the whole ~45s round-trip so it can't
+  // be double-submitted.
+  async function startClimate() {
+    if (!climateStartBtn || climateStartBtn.disabled) return;
     var minutes = selectedMinutes;
-    setBtnBusy(btn, true, "sending");
+    var options = VALID_OPTIONS.filter(function (o) { return !!selectedOptions[o]; });
+    var payload = {
+      action: "climate", minutes: minutes,
+      temperatureC: selectedTempC, options: options
+    };
+
+    climateStartBtn.disabled = true;
+    climateStartBtn.classList.add("sending");
+    startLabel("Starting…");
     try {
-      var result = await postCommand(action, minutes);
-      if (reportCommand(action, result)) markActiveFor(btn, minutes);
+      var result = await postCommandBody(payload);
+      climateStartBtn.classList.remove("sending");
+      if (reportCommand("climate", result)) {
+        climateRunning = true;
+        climateStartBtn.classList.add("running");
+        startLabel("Climate running");
+        clearTimeout(climateStartBtn._runTimer);
+        climateStartBtn._runTimer = setTimeout(function () {
+          climateRunning = false;
+          climateStartBtn.classList.remove("running");
+          startLabel("Start climate");
+        }, minutes * 60 * 1000);
+        Array.prototype.forEach.call(comfortButtons(), function (b) {
+          if (selectedOptions[b.dataset.option]) markRunningFor(b, minutes);
+        });
+      } else {
+        startLabel("Start climate");
+      }
     } catch (e) {
+      climateStartBtn.classList.remove("sending");
+      startLabel("Start climate");
       toast("Network error: " + e.message, "error");
     } finally {
-      setBtnBusy(btn, false, "sending");
+      climateStartBtn.disabled = false;
     }
   }
 
-  var climatePanel = document.getElementById("climate-panel");
+  // One delegated listener on #climate-panel routes every control.
   if (climatePanel) {
     climatePanel.addEventListener("click", function (e) {
-      var btn = e.target.closest(".hvac-action");
-      if (!btn || btn.disabled) return;
-      sendHvac(btn.dataset.action, btn);
+      var toggle = e.target.closest(".comfort-toggle");
+      if (toggle) { toggleOption(toggle); return; }
+      var dur = e.target.closest(".duration-opt");
+      if (dur) { selectDuration(dur); return; }
+      var temp = e.target.closest(".temp-step");
+      if (temp) { stepTemp(parseInt(temp.dataset.tempStep, 10) || 0); return; }
+      var start = e.target.closest(".climate-master");
+      if (start) { startClimate(); return; }
     });
   }
+  renderTemp();
 
-  // ---- manual "refresh now" (live status, on demand only — no auto-polling,
-  // to avoid repeatedly waking the vehicle's telematics unit) ----
+  // ---- live status fetch (shared by manual refresh + one-shot auto refresh) ----
+  // GET /status; on a good payload merge just `latest` into the cached data and
+  // rebroadcast (updates app.js tiles AND three-scene.js). Returns a small
+  // result object — callers decide whether to surface success/failure.
+  async function fetchLiveStatus(key) {
+    var res = await fetch(CONFIG.WORKER_URL + "/status", {
+      method: "GET",
+      headers: { "X-Dashboard-Key": key }
+    });
+    var body = {};
+    try { body = await res.json(); } catch (e) { /* non-JSON */ }
+    if (res.ok && body.success && body.latest) {
+      var merged = Object.assign({}, lastData || {}, { latest: body.latest });
+      window.PHEV.setData(merged);
+      return { ok: true, body: body };
+    }
+    return { ok: false, status: res.status, body: body };
+  }
+
+  // Manual "refresh now" — an explicit user action, so it is loud: spinner +
+  // toasts, and it nudges Settings if no key is set. No auto-polling; every call
+  // wakes the vehicle's telematics unit.
   async function refreshNow(btn) {
     var key = requireKey();
     if (!key) return;
     btn.disabled = true;
     btn.classList.add("spinning");
     try {
-      var res = await fetch(CONFIG.WORKER_URL + "/status", {
-        method: "GET",
-        headers: { "X-Dashboard-Key": key }
-      });
-      var body = {};
-      try { body = await res.json(); } catch (e) { /* non-JSON */ }
-      if (res.ok && body.success && body.latest) {
-        var merged = Object.assign({}, lastData || {}, { latest: body.latest });
-        window.PHEV.setData(merged); // broadcasts to app.js AND three-scene.js listeners
-        toast("Live status refreshed.", "success");
-      } else {
-        toast(body.error || ("Refresh failed (HTTP " + res.status + ")"), "error");
-      }
+      var r = await fetchLiveStatus(key);
+      if (r.ok) toast("Live status refreshed.", "success");
+      else toast((r.body && r.body.error) || ("Refresh failed (HTTP " + r.status + ")"), "error");
     } catch (e) {
       toast("Network error: " + e.message, "error");
     } finally {
@@ -313,6 +440,43 @@
 
   var refreshBtn = document.getElementById("btn-refresh");
   if (refreshBtn) refreshBtn.addEventListener("click", function () { refreshNow(refreshBtn); });
+
+  // ---- one-shot auto refresh on unlock ----
+  // The cached snapshot can be up to an hour stale, so pull one live status right
+  // after unlock — the first view is then current with no manual refresh. Quiet
+  // path: no key -> stay on cached data silently; any error also fails silent
+  // (no toast, no settings modal — those belong to explicit taps only). Fires
+  // exactly once per unlock (guarded in render()); no polling, no refetch on tab
+  // switch, so the telematics unit is woken at most once.
+  var autoRefreshed = false;
+  var vehUpdatedEl = document.getElementById("veh-updated");
+  var updatingEl = null;
+  function showUpdating(on) {
+    if (!vehUpdatedEl) return;
+    if (on) {
+      if (!updatingEl) {
+        updatingEl = document.createElement("span");
+        updatingEl.className = "veh-updating";
+        updatingEl.textContent = "updating…";
+      }
+      if (updatingEl.parentNode !== vehUpdatedEl) vehUpdatedEl.appendChild(updatingEl);
+    } else if (updatingEl && updatingEl.parentNode) {
+      updatingEl.parentNode.removeChild(updatingEl);
+    }
+  }
+
+  async function autoRefreshOnUnlock() {
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) return;                 // no key -> silent, keep cached data
+    showUpdating(true);
+    try {
+      await fetchLiveStatus(key);     // merge happens inside on success
+    } catch (e) {
+      /* silent — cached data stays on screen */
+    } finally {
+      showUpdating(false);
+    }
+  }
 
   // ---- wire up ----
   window.PHEV.onData(render);
