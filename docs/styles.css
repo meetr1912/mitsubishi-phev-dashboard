@@ -338,6 +338,20 @@ button {
   font-size: 0.78rem;
   color: #ffc2cb;
 }
+
+/* ============================= VEHICLE FLAGS ============================= */
+.flags { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.flag-chip {
+  display: flex; align-items: center; gap: 0.4rem;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-mid);
+}
+.flag-chip.flag-on { border-color: var(--accent-dim); color: var(--accent-soft); }
+.flag-chip.flag-alert { border-color: var(--danger-glow); background: rgba(255, 95, 118, 0.12); color: #ffc2cb; }
 .warning-icon { font-size: 0.9rem; }
 
 /* ============================= CLIMATE & COMFORT (new) ============================= */

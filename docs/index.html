@@ -276,6 +276,28 @@
       <div class="warnings" id="warnings"></div>
     </section>
 
+    <!-- Driving score: rides inside the same VHR response as tire pressure,
+         not a separate call. Hidden unless the account has any recent
+         driving history to score. -->
+    <section class="panel" id="driving-score-panel" hidden>
+      <h2 class="panel-title">Driving score</h2>
+      <div class="tiles">
+        <div class="tile"><span class="tile-label">Overall</span><span class="tile-value" data-field="ds_overall">—</span></div>
+        <div class="tile"><span class="tile-label">Acceleration</span><span class="tile-value" data-field="ds_accel">—</span></div>
+        <div class="tile"><span class="tile-label">Steering</span><span class="tile-value" data-field="ds_steer">—</span></div>
+        <div class="tile"><span class="tile-label">Braking</span><span class="tile-value" data-field="ds_brake">—</span></div>
+        <div class="tile"><span class="tile-label">Fuel economy</span><span class="tile-value" data-field="ds_fuel">—</span></div>
+      </div>
+    </section>
+
+    <!-- Vehicle flags: live-only (GET /state), not part of the hourly
+         snapshot -- populated after the first live refresh, not on initial
+         cached-data paint. -->
+    <section class="panel" id="flags-panel" hidden>
+      <h2 class="panel-title">Vehicle flags</h2>
+      <div class="flags" id="flags"></div>
+    </section>
+
       <footer class="app-footer">
         <span id="veh-vin">—</span>
       </footer>

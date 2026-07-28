@@ -1272,6 +1272,51 @@ function parseFirmware(health: JsonValue): string | null {
   return (v !== null && v !== undefined && v !== "") ? String(v) : null;
 }
 
+/** Ports _flatten_score_list() from mitsubishi_na/parsers.py. */
+function flattenScoreList(raw: JsonValue | undefined): Record<string, JsonValue> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+  if (Array.isArray(raw)) {
+    const flat: Record<string, JsonValue> = {};
+    for (const item of raw) {
+      if (item !== null && typeof item === "object" && !Array.isArray(item)) Object.assign(flat, item);
+    }
+    return flat;
+  }
+  return {};
+}
+
+/** Ports _score_value() from mitsubishi_na/parsers.py. */
+function scoreValue(entry: JsonValue | undefined): JsonValue {
+  if (entry === undefined) return null;
+  if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && "value" in entry) {
+    const v = entry["value"];
+    return v === undefined ? null : v;
+  }
+  return entry;
+}
+
+/**
+ * Eco-driving score. Rides inside the same VHR (health) response already
+ * fetched for tire/warnings/firmware -- not a separate endpoint or extra
+ * round trip. Ports parse_driving_score() from mitsubishi_na/parsers.py.
+ *
+ * [UNVERIFIED] Field locations are inferred from decompiled classes, not a
+ * confirmed live example -- expect nulls until validated against a real
+ * account with driving history.
+ */
+function parseDrivingScore(health: JsonValue): Record<string, JsonValue> {
+  const driving = flattenScoreList(findKey(health, "drivingScore"));
+  const fuelEconomyRaw = findKey(health, "fuelEconomyScore");
+  return {
+    overall_score: scoreValue(driving["overallScore"]),
+    acceleration_score: scoreValue(driving["accelScore"]),
+    steering_score: scoreValue(driving["steerScore"]),
+    braking_score: scoreValue(driving["brakeScore"]),
+    fuel_economy_score: scoreValue(fuelEconomyRaw),
+  };
+}
+
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
 async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
   const headers = sharedHeaders(`Bearer ${accessToken}`);
@@ -1312,6 +1357,7 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
     tire_pressure_bar: parseTiresPressure(health ?? {}),
     warnings: parseWarnings(health ?? {}),
     firmware_version: parseFirmware(health ?? {}),
+    driving_score: parseDrivingScore(health ?? {}),
   };
 }
 

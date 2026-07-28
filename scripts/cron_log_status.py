@@ -62,6 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from mitsubishi_na.api import MitsubishiNAClient  # noqa: E402
+from mitsubishi_na.parsers import parse_driving_score  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants (must match docs/crypto.js + docs/data/meta.json)
@@ -461,6 +462,11 @@ def build_latest(state: dict, health: dict, ts: str) -> dict:
         "tire_pressure_bar": parse_tires(health),
         "warnings": parse_warnings(health),
         "firmware_version": parse_firmware(health),
+        # Field locations are inferred from decompiled classes, not confirmed
+        # against a live example (see parse_driving_score's docstring) --
+        # expect nulls until validated against a real account with driving
+        # history.
+        "driving_score": parse_driving_score(health or {}),
     }
 
 

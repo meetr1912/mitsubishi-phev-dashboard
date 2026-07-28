@@ -90,9 +90,10 @@
     });
     paintLights(l.headlights);
 
-    // tire pressure + active warnings
+    // tire pressure + active warnings + driving score
     renderTires(l.tire_pressure_bar);
     renderWarnings(l.warnings);
+    renderDrivingScore(l.driving_score);
 
     // First paint after unlock renders the cached snapshot; immediately pull one
     // live status so the very first view is current without a manual refresh.
@@ -147,6 +148,57 @@
       container.appendChild(chip);
     });
     panel.hidden = false;
+  }
+
+  // ---- driving score (panel hidden unless the account has any score to show) ----
+  // [UNVERIFIED] field locations are inferred from decompiled classes on the
+  // worker side (see index.ts parseDrivingScore) -- expect "—" until
+  // confirmed against a real account with driving history.
+  var DRIVING_SCORE_FIELDS = ["ds_overall", "ds_accel", "ds_steer", "ds_brake", "ds_fuel"];
+  function renderDrivingScore(score) {
+    var panel = document.getElementById("driving-score-panel");
+    if (!panel) return;
+    score = score || {};
+    var values = {
+      ds_overall: score.overall_score,
+      ds_accel: score.acceleration_score,
+      ds_steer: score.steering_score,
+      ds_brake: score.braking_score,
+      ds_fuel: score.fuel_economy_score
+    };
+    var any = DRIVING_SCORE_FIELDS.some(function (k) { return values[k] != null; });
+    panel.hidden = !any;
+    if (!any) return;
+    DRIVING_SCORE_FIELDS.forEach(function (k) { setField(k, values[k]); });
+  }
+
+  // ---- vehicle flags (live-only: GET /state, not part of the hourly snapshot) ----
+  var FLAG_DEFS = [
+    { key: "ignitionOn", label: "Ignition" },
+    { key: "privacyModeEnabled", label: "Privacy mode" },
+    { key: "diagnosticMode", label: "Diagnostic mode" },
+    { key: "svla", label: "SVLA" },
+    { key: "theftAlarm", label: "Theft alarm active", onlyIfTrue: true },
+    { key: "factoryReset", label: "Factory reset detected", onlyIfTrue: true }
+  ];
+  function renderFlags(flags) {
+    var panel = document.getElementById("flags-panel");
+    var container = document.getElementById("flags");
+    if (!panel || !container) return;
+    flags = flags || {};
+    container.innerHTML = "";
+    var shown = 0;
+    FLAG_DEFS.forEach(function (def) {
+      var val = flags[def.key];
+      if (val === null || val === undefined) return; // unknown -- omit rather than guess
+      if (def.onlyIfTrue && !val) return;
+      shown++;
+      var chip = document.createElement("div");
+      chip.className = "flag-chip" + (val ? " flag-on" : "") + (def.onlyIfTrue ? " flag-alert" : "");
+      chip.textContent = def.onlyIfTrue ? def.label : (def.label + ": " + (val ? "On" : "Off"));
+      container.appendChild(chip);
+    });
+    panel.hidden = shown === 0;
   }
 
   function rangeStr(km) {
@@ -502,6 +554,21 @@
     return { ok: false, status: res.status, body: body };
   }
 
+  // GET /state; renders straight into the flags panel (no cached-data merge —
+  // these flags aren't part of the hourly snapshot, so there's nothing to
+  // merge them into). Always best-effort: a failure here should never make an
+  // otherwise-successful /status refresh look failed.
+  async function fetchVehicleFlags(key) {
+    var res = await fetch(CONFIG.WORKER_URL + "/state", {
+      method: "GET",
+      headers: { "X-Dashboard-Key": key }
+    });
+    var body = {};
+    try { body = await res.json(); } catch (e) { /* non-JSON */ }
+    if (res.ok && body.success && body.state) renderFlags(body.state);
+    return { ok: res.ok && !!(body && body.success) };
+  }
+
   // Manual "refresh now" — an explicit user action, so it is loud: spinner +
   // toasts, and it nudges Settings if no key is set. No auto-polling; every call
   // wakes the vehicle's telematics unit.
@@ -512,6 +579,7 @@
     btn.classList.add("spinning");
     try {
       var r = await fetchLiveStatus(key);
+      fetchVehicleFlags(key).catch(function () { /* best-effort, not part of the toast below */ });
       if (r.ok) toast("Live status refreshed.", "success");
       else toast((r.body && r.body.error) || ("Refresh failed (HTTP " + r.status + ")"), "error");
     } catch (e) {
@@ -555,6 +623,7 @@
     showUpdating(true);
     try {
       await fetchLiveStatus(key);     // merge happens inside on success
+      await fetchVehicleFlags(key);   // renders directly; no merge to do
     } catch (e) {
       /* silent — cached data stays on screen */
     } finally {
