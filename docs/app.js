@@ -341,6 +341,14 @@
   var selectedTempC = 22;
   var selectedOptions = {};       // option string -> true
   var climateRunning = false;     // true only after a confirmed Start
+  // Separate from climateRunning: the vehicle allows exactly one active
+  // remoteAC session. climateRunning gets cleared the instant any setting
+  // changes (markPending, below) so the UI stops claiming the OLD config is
+  // still live -- but the car doesn't know that. sessionOnVehicle tracks the
+  // real backend state and is cleared only by a confirmed climate_stop (or
+  // the session's own duration elapsing), so startClimate() knows whether it
+  // needs to stop the old session before submitting a new one.
+  var sessionOnVehicle = false;
 
   var climatePanel = document.getElementById("climate-panel");
   var climateStartBtn = document.getElementById("climate-start");
@@ -429,6 +437,7 @@
       var result = await postCommand("climate_stop");
       if (reportCommand("climate_stop", result)) {
         markPending();
+        sessionOnVehicle = false;
       }
     } catch (e) {
       toast("Network error: " + e.message, "error");
@@ -488,18 +497,34 @@
 
     climateStartBtn.disabled = true;
     climateStartBtn.classList.add("sending");
-    startLabel("Starting…");
+    startLabel(sessionOnVehicle ? "Updating…" : "Starting…");
     try {
+      // The vehicle allows exactly one active remoteAC session -- confirmed
+      // live, a second climate_start while one is already running is
+      // rejected outright (RO_FAILURE_ALREADY_STARTED), even with
+      // forced:"true". So a setting change mid-session has to stop the old
+      // session before the new one can start; done here so it's still one
+      // button press for the user instead of a confusing rejection.
+      if (sessionOnVehicle) {
+        var stopResult = await postCommand("climate_stop");
+        if (!reportCommand("climate_stop", stopResult)) {
+          startLabel("Climate running");
+          return;
+        }
+        sessionOnVehicle = false;
+      }
       var result = await postCommandBody(payload);
       climateStartBtn.classList.remove("sending");
       if (reportCommand("climate", result)) {
         climateRunning = true;
+        sessionOnVehicle = true;
         climateStartBtn.classList.add("running");
         if (climateStopBtn) climateStopBtn.hidden = false;
         startLabel("Climate running");
         clearTimeout(climateStartBtn._runTimer);
         climateStartBtn._runTimer = setTimeout(function () {
           climateRunning = false;
+          sessionOnVehicle = false;
           climateStartBtn.classList.remove("running");
           startLabel("Start climate");
         }, minutes * 60 * 1000);
@@ -507,11 +532,16 @@
           if (selectedOptions[b.dataset.option]) markRunningFor(b, minutes);
         });
       } else {
+        // The stop (if any) succeeded but the restart didn't -- the car is
+        // now actually off, so reflect that instead of leaving stale
+        // "running" UI behind.
+        climateRunning = false;
+        if (climateStopBtn) climateStopBtn.hidden = true;
         startLabel("Start climate");
       }
     } catch (e) {
       climateStartBtn.classList.remove("sending");
-      startLabel("Start climate");
+      startLabel(sessionOnVehicle ? "Climate running" : "Start climate");
       toast("Network error: " + e.message, "error");
     } finally {
       climateStartBtn.disabled = false;
