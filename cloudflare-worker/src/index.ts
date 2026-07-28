@@ -1199,6 +1199,79 @@ function parseHeadlights(state: JsonValue): string {
   return flat !== undefined ? (toBool(flat) ? "on" : "off") : "off";
 }
 
+const TIRE_POS: Record<number, string> = { 0: "front_left", 1: "front_right", 2: "rear_left", 3: "rear_right" };
+
+/**
+ * Newest VHR entry's diagnostic block (or the health payload itself as a
+ * fallback). Ports _latest_vhr_diagnostic() from cron_log_status.py —
+ * warnings/tires/firmware all read off this, not the top-level health blob.
+ */
+function latestVhrDiagnostic(health: JsonValue): JsonValue {
+  if (health === null || typeof health !== "object" || Array.isArray(health)) return {};
+  const vhr = health["vhr"];
+  if (Array.isArray(vhr) && vhr.length > 0) {
+    let newest: JsonValue = vhr[0];
+    let newestTs = "";
+    for (const e of vhr) {
+      const ts = e !== null && typeof e === "object" && !Array.isArray(e) ? String(scalar(e["ts"]) ?? "") : "";
+      if (ts >= newestTs) { newestTs = ts; newest = e; }
+    }
+    const diag = findKey(newest, "diagnostic");
+    if (diag !== undefined && diag !== null && typeof diag === "object" && !Array.isArray(diag)) return diag;
+    return (newest !== null && typeof newest === "object" && !Array.isArray(newest)) ? newest : {};
+  }
+  const diag = findKey(health, "diagnostic");
+  return (diag !== undefined && diag !== null && typeof diag === "object" && !Array.isArray(diag)) ? diag : health;
+}
+
+/** Ports parse_warnings() from cron_log_status.py. Absent keys default to false. */
+function parseWarnings(health: JsonValue): Record<string, boolean> {
+  const diag = latestVhrDiagnostic(health);
+  return {
+    brake: toBool(firstPresent(diag, ["brakeFluidWarning", "brakeWarning", "brakeWarningLamp", "brakeAlert"])),
+    engine_oil: toBool(firstPresent(diag, [
+      "engineOilWarning", "oilWarning", "engineOilLevelWarning", "oilPressureWarning", "oilLevelWarning",
+    ])),
+    tire_pressure: toBool(firstPresent(diag, [
+      "tirePressureWarning", "tyrePressureWarning", "tpmsWarning", "lowTirePressureWarning", "tpmsAlert",
+    ])),
+    mil: toBool(firstPresent(diag, [
+      "malfunctionIndicatorLamp", "milStatus", "mil", "checkEngineWarning", "checkEngine",
+    ])),
+    abs: toBool(firstPresent(diag, ["absWarning", "antiLockBrakeWarning", "absWarningLamp", "absAlert"])),
+    airbag: toBool(firstPresent(diag, ["airbagWarning", "srsWarning", "airbagWarningLamp", "srsWarningLamp"])),
+  };
+}
+
+/** Ports parse_tires() from cron_log_status.py: VHR tireStatus.tires[] -> bar, 2dp. */
+function parseTiresPressure(health: JsonValue): Record<string, number | null> {
+  const diag = latestVhrDiagnostic(health);
+  const result: Record<string, number | null> = {
+    front_left: null, front_right: null, rear_left: null, rear_right: null,
+  };
+  const tireStatus = findKey(diag, "tireStatus");
+  let tires = tireStatus !== undefined && typeof tireStatus === "object" && !Array.isArray(tireStatus)
+    ? findKey(tireStatus, "tires") : undefined;
+  if (tires === undefined) tires = findKey(diag, "tires");
+  if (!Array.isArray(tires)) return result;
+  for (const tire of tires) {
+    if (tire === null || typeof tire !== "object" || Array.isArray(tire)) continue;
+    const pos = toInt(firstPresent(tire, ["position"]));
+    const kpa = toFloat(firstPresent(tire, ["pressureValue", "pressure", "pressureKpa", "tirePressure"]));
+    const key = pos !== null ? TIRE_POS[pos] : undefined;
+    if (key && kpa !== null) result[key] = Math.round((kpa / 100) * 100) / 100;
+  }
+  return result;
+}
+
+/** Ports parse_firmware() from cron_log_status.py. */
+function parseFirmware(health: JsonValue): string | null {
+  const v = scalar(firstPresent(health, [
+    "firmwareVersion", "swVersion", "softwareVersion", "fwVersion", "moduleFirmwareVersion",
+  ]));
+  return (v !== null && v !== undefined && v !== "") ? String(v) : null;
+}
+
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
 async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
   const headers = sharedHeaders(`Bearer ${accessToken}`);
@@ -1236,6 +1309,9 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
     },
     doors: parseDoors(state),
     headlights: parseHeadlights(state),
+    tire_pressure_bar: parseTiresPressure(health ?? {}),
+    warnings: parseWarnings(health ?? {}),
+    firmware_version: parseFirmware(health ?? {}),
   };
 }
 
