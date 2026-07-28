@@ -28,6 +28,8 @@ const EP_USER_INFO = "/user/v1/users/email/"; // + encodeURIComponent(email)
 const EP_SERVER_NONCE = "/oauth/v3/remoteOperation";
 const EP_PIN_TOKEN = "/oauth/v3/remoteOperation/pin";
 const EP_PERFORM_RO = "/avi/v3/remoteOperation";
+const EP_VEHICLE_STATE = "/avi/v1/vehicles/{vin}/vehiclestate";
+const EP_VEHICLE_HEALTH = "/avi/v1/vehicles/{vin}/vehicleStatus";
 
 /** action (from dashboard) -> Aeris "operation" field. */
 const OPERATION_MAP: Record<string, string> = {
@@ -58,7 +60,7 @@ const CORS_HEADERS: Record<string, string> = {
   // browser sends a CORS preflight for the custom X-Dashboard-Key header.
   // Access is still gated by that key, so a wildcard origin is acceptable here.
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-Dashboard-Key",
   "Access-Control-Max-Age": "86400",
 };
@@ -285,6 +287,204 @@ async function safeText(res: Response): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Live status (ported from scripts/cron_log_status.py — same field names,
+// same defensive-parsing approach, so the frontend renders both identically)
+// ---------------------------------------------------------------------------
+
+type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
+
+function findKey(obj: JsonValue, target: string): JsonValue | undefined {
+  if (obj !== null && typeof obj === "object" && !Array.isArray(obj)) {
+    if (target in obj) return obj[target];
+    for (const v of Object.values(obj)) {
+      const found = findKey(v, target);
+      if (found !== undefined) return found;
+    }
+  } else if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = findKey(item, target);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+function firstPresent(obj: JsonValue, keys: string[]): JsonValue | undefined {
+  for (const key of keys) {
+    const v = findKey(obj, key);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+/** Unwrap the common {"value": X} response wrapper. */
+function scalar(value: JsonValue | undefined): JsonValue | undefined {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const k of ["value", "val", "data"]) {
+      if (k in value) return value[k];
+    }
+  }
+  return value;
+}
+
+/** cruisingRangeFirst/Second come back as [{"range":"X"},{"engineType":"Y"}]. */
+function extractRange(value: JsonValue | undefined): JsonValue | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item !== null && typeof item === "object" && !Array.isArray(item) && "range" in item) {
+        return item.range;
+      }
+    }
+    return undefined;
+  }
+  return value;
+}
+
+function toFloat(value: JsonValue | undefined): number | null {
+  const v = scalar(value);
+  const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function toInt(value: JsonValue | undefined, def: number | null = null): number | null {
+  const f = toFloat(value);
+  return f !== null ? Math.round(f) : def;
+}
+
+function toBool(value: JsonValue | undefined): boolean {
+  const v = scalar(value);
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "string") {
+    return ["true", "1", "yes", "on", "open", "opened", "plugged", "pluggedin", "connected", "charging"].includes(
+      v.trim().toLowerCase(),
+    );
+  }
+  return false;
+}
+
+function chargingStatus(value: JsonValue | undefined): string {
+  const v = scalar(value);
+  if (typeof v === "boolean" || typeof v === "number") return v ? "charging" : "not_charging";
+  const s = String(v ?? "").toLowerCase();
+  if (["charging", "in_progress", "inprogress", "active"].some((t) => s.includes(t)) && !s.includes("not")) {
+    return "charging";
+  }
+  return "not_charging";
+}
+
+const DOOR_ALIASES: Record<string, string> = {
+  frontleft: "front_left", fl: "front_left", driverfront: "front_left", leftfront: "front_left",
+  frontright: "front_right", fr: "front_right", passengerfront: "front_right", rightfront: "front_right",
+  rearleft: "rear_left", rl: "rear_left", leftrear: "rear_left", driverrear: "rear_left",
+  rearright: "rear_right", rr: "rear_right", rightrear: "rear_right", passengerrear: "rear_right",
+  hood: "hood", bonnet: "hood", frunk: "hood",
+  trunk: "trunk", tailgate: "trunk", boot: "trunk", liftgate: "trunk", hatch: "trunk",
+};
+
+function norm(text: JsonValue | undefined): string {
+  return String(text ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function entryName(entry: Record<string, JsonValue>): string {
+  for (const k of ["location", "position", "doorLocation", "name", "door", "type", "id", "lightLocation", "light"]) {
+    const v = entry[k];
+    if (typeof v === "string") return v;
+  }
+  return "";
+}
+
+function entryState(entry: Record<string, JsonValue>): JsonValue | undefined {
+  for (const k of ["status", "state", "doorStatus", "lightStatus", "open", "on", "value"]) {
+    if (k in entry) return entry[k];
+  }
+  return undefined;
+}
+
+function openClosed(value: JsonValue | undefined): string {
+  const v = scalar(value);
+  if (typeof v === "string" && ["ajar", "open", "opened"].includes(v.trim().toLowerCase())) return "open";
+  return toBool(v) ? "open" : "closed";
+}
+
+function parseDoors(state: JsonValue): Record<string, string> {
+  const doors: Record<string, string> = {
+    front_left: "closed", front_right: "closed", rear_left: "closed", rear_right: "closed",
+    hood: "closed", trunk: "closed",
+  };
+  let doorList = firstPresent(state, ["doors"]);
+  const doorStatus = findKey(state, "doorStatus");
+  if (doorStatus !== undefined && typeof doorStatus === "object" && !Array.isArray(doorStatus)) {
+    doorList = findKey(doorStatus, "doors") ?? doorList;
+  }
+  if (!Array.isArray(doorList)) return doors;
+  for (const entry of doorList) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const canonical = DOOR_ALIASES[norm(entryName(entry))];
+    if (canonical) doors[canonical] = openClosed(entryState(entry));
+  }
+  return doors;
+}
+
+function parseHeadlights(state: JsonValue): string {
+  let lights: JsonValue | undefined;
+  const lightStatus = findKey(state, "lightStatus");
+  if (lightStatus !== undefined && typeof lightStatus === "object" && !Array.isArray(lightStatus)) {
+    lights = findKey(lightStatus, "lights");
+  }
+  if (lights === undefined) lights = findKey(state, "lights");
+  if (Array.isArray(lights)) {
+    for (const entry of lights) {
+      if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && norm(entryName(entry)).includes("head")) {
+        return toBool(entryState(entry)) ? "on" : "off";
+      }
+    }
+  }
+  const flat = firstPresent(state, ["headlightStatus", "headLampStatus", "headlights"]);
+  return flat !== undefined ? (toBool(flat) ? "on" : "off") : "off";
+}
+
+/** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
+async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
+  const headers = sharedHeaders(`Bearer ${accessToken}`);
+  const [stateRes, healthRes] = await Promise.all([
+    fetch(BASE_URL + EP_VEHICLE_STATE.replace("{vin}", vin), { headers }),
+    fetch(BASE_URL + EP_VEHICLE_HEALTH.replace("{vin}", vin) + "?count=1", { headers }),
+  ]);
+  if (!stateRes.ok) throw new ApiError(502, `vehiclestate failed: HTTP ${stateRes.status} ${await safeText(stateRes)}`);
+
+  const state = (await stateRes.json()) as JsonValue;
+  const health = stateRes.ok && healthRes.ok ? ((await healthRes.json()) as JsonValue) : null;
+
+  const charging = (findKey(state, "chargingControl") ?? state) as JsonValue;
+  const battery = toInt(firstPresent(charging, ["hvBatteryLife"]));
+  const gasRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeFirst"])));
+  const evRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeSecond"])));
+  let totalRange = toInt(firstPresent(charging, ["cruisingRangeCombined"]));
+  if (totalRange === null && (evRange !== null || gasRange !== null)) totalRange = (evRange ?? 0) + (gasRange ?? 0);
+
+  return {
+    ts: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+    battery_pct: battery ?? 0,
+    ev_range_km: evRange ?? 0,
+    gas_range_km: gasRange ?? 0,
+    total_range_km: totalRange ?? 0,
+    odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])) ?? 0,
+    charging_status: chargingStatus(firstPresent(charging, ["hvChargingStatus"])),
+    plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus"])),
+    time_to_full_charge_min: toInt(firstPresent(charging, ["hvTimeToFullCharge"]), 0) ?? 0,
+    ignition_on: toBool(firstPresent(state, ["ignitionStatus", "ignition", "ignitionState"])),
+    speed_kmh: toInt(firstPresent(state, ["speed", "vehicleSpeed", "spd"]), 0) ?? 0,
+    location: {
+      lat: toFloat(firstPresent(state, ["lat", "latitude"])),
+      lon: toFloat(firstPresent(state, ["lon", "lng", "longitude"])),
+    },
+    doors: parseDoors(state),
+    headlights: parseHeadlights(state),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Worker entrypoint
 // ---------------------------------------------------------------------------
 
@@ -295,7 +495,9 @@ export default {
     }
 
     const url = new URL(request.url);
-    if (url.pathname !== "/command" || request.method !== "POST") {
+    const isCommand = url.pathname === "/command" && request.method === "POST";
+    const isStatus = url.pathname === "/status" && request.method === "GET";
+    if (!isCommand && !isStatus) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -303,6 +505,18 @@ export default {
     const providedKey = request.headers.get("X-Dashboard-Key") ?? "";
     if (!env.DASHBOARD_API_KEY || !(await timingSafeEqual(providedKey, env.DASHBOARD_API_KEY))) {
       return json({ success: false, error: "Unauthorized" }, 401);
+    }
+
+    if (isStatus) {
+      try {
+        const accessToken = await login(env);
+        const vin = await getVin(env, accessToken);
+        const latest = await fetchLiveStatus(env, accessToken, vin);
+        return json({ success: true, latest });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
     }
 
     // --- Parse body ---

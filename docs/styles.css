@@ -158,6 +158,11 @@ button {
   color: var(--text);
 }
 
+.icon-btn.spinning {
+  animation: spin 0.7s linear infinite;
+  opacity: 0.6;
+}
+
 /* ============================= HERO / 3D ============================= */
 .hero {
   position: relative;

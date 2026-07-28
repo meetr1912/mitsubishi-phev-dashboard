@@ -51,8 +51,10 @@
   }
 
   // ---- render header + tiles ----
+  var lastData = null;
   function render(data) {
     if (!data) return;
+    lastData = data;
     var v = data.vehicle || {};
     var l = data.latest || {};
 
@@ -180,6 +182,46 @@
     if (!action || action === "defrost") return; // defrost is honestly disabled
     sendCommand(action, btn);
   });
+
+  // ---- manual "refresh now" (live status, on demand only — no auto-polling,
+  // to avoid repeatedly waking the vehicle's telematics unit) ----
+  async function refreshNow(btn) {
+    if (CONFIG.WORKER_URL.indexOf("REPLACE-ME") !== -1) {
+      toast("Set CONFIG.WORKER_URL in app.js first.", "error");
+      return;
+    }
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) {
+      toast("Set your Dashboard command key in Settings.", "error");
+      if (window.PHEV.openSettings) window.PHEV.openSettings();
+      return;
+    }
+    btn.disabled = true;
+    btn.classList.add("spinning");
+    try {
+      var res = await fetch(CONFIG.WORKER_URL + "/status", {
+        method: "GET",
+        headers: { "X-Dashboard-Key": key }
+      });
+      var body = {};
+      try { body = await res.json(); } catch (e) { /* non-JSON */ }
+      if (res.ok && body.success && body.latest) {
+        var merged = Object.assign({}, lastData || {}, { latest: body.latest });
+        window.PHEV.setData(merged); // broadcasts to app.js AND three-scene.js listeners
+        toast("Live status refreshed.", "success");
+      } else {
+        toast(body.error || ("Refresh failed (HTTP " + res.status + ")"), "error");
+      }
+    } catch (e) {
+      toast("Network error: " + e.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("spinning");
+    }
+  }
+
+  var refreshBtn = document.getElementById("btn-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", function () { refreshNow(refreshBtn); });
 
   // ---- wire up ----
   window.PHEV.onData(render);
