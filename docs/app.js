@@ -247,8 +247,13 @@
 
   // ---- commands ----
   // The Worker polls the vehicle's event endpoint before replying, so a call
-  // can legitimately take ~45s. Buttons keep their icon and label throughout
-  // (no innerHTML swap) and just carry a pending class.
+  // can legitimately take up to ~75s (worst case seen live 2026-07-28: 60s to
+  // reach a terminal state) — and "climate" specifically can take up to ~120s,
+  // since it first submits and polls an engineOff teardown before the actual
+  // remoteAC start (see runClimateStart() in the Worker). Buttons keep their
+  // icon and label throughout (no innerHTML swap) and just carry a pending
+  // class; there is no client-side fetch timeout, so this is a long wait, not
+  // a stuck one.
   function setBtnBusy(btn, busy, busyClass) {
     btn.disabled = busy;
     btn.classList.toggle(busyClass, busy);
@@ -491,8 +496,8 @@
   }
 
   // The single submit. Builds the composite payload and sends exactly one
-  // request; the button is disabled for the whole ~45s round-trip so it can't
-  // be double-submitted.
+  // request; the button is disabled for the whole round-trip (up to ~120s —
+  // see the setBtnBusy comment above) so it can't be double-submitted.
   async function startClimate() {
     if (!climateStartBtn || climateStartBtn.disabled) return;
     var minutes = selectedMinutes;

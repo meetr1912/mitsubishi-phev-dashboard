@@ -170,8 +170,9 @@
         <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
       </symbol>
 
-      <!-- Fan at full tilt, for max-defrost (fanMode:"DEFROST") — same blades as
-           icon-fan plus motion lines, so the two read as a matched pair. -->
+      <!-- Fan at full tilt, for max-defrost (the top-level "def" flag) — same
+           blades as icon-fan plus motion lines, so the two read as a matched
+           pair. -->
       <symbol id="icon-fan-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="1.8" />
         <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2z" />
@@ -481,8 +482,9 @@
         <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_rear" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-defrost-rear" /></svg> Rear defrost
         </button>
-        <!-- Not the same thing as front/rear defrost: this is fanMode:"DEFROST",
-             a distinct max-airflow mode the car can run alongside either. -->
+        <!-- Not the same thing as front/rear defrost: this is the top-level
+             "def" flag, independent of frontDefrostMode/rearDefrostMode, and
+             the car can run it alongside either. -->
         <button type="button" class="hvac-btn comfort-toggle" data-option="max_defrost" aria-pressed="false">
           <svg aria-hidden="true"><use href="#icon-fan-max" /></svg> Max defrost
         </button>

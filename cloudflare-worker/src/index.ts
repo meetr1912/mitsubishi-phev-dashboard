@@ -88,6 +88,46 @@ const OPERATION_MAP: Record<string, string> = {
 };
 
 /**
+ * Operations that carry a pinToken.
+ *
+ * Only these two. The worker previously ran the full PIN handshake for EVERY
+ * command and attached the resulting token to all of them, on the assumption
+ * that any actuation needs one. The validated Python client
+ * (mitsubishi_na/const.py RO_REQUIRE_PIN) sends a pinToken for doorUnlock and
+ * locate ONLY, and its lock/horn/lights/remoteAC/engineOff calls all reach
+ * Successful without one — so the token is not required there.
+ *
+ * Two things this buys beyond matching the app: every non-PIN command drops two
+ * subrequests (GetServerNonce + GetPinToken) off its critical path, and a
+ * transient PIN-handshake failure can no longer take down commands that never
+ * needed the PIN in the first place.
+ *
+ * locate is read-only (it reports GPS, actuates nothing) yet still needs the
+ * token; lock actuates the car and does not. The split is the server's, not a
+ * risk ordering we can infer.
+ */
+const OPERATIONS_REQUIRING_PIN = new Set(["doorUnlock", "locate"]);
+
+/**
+ * Per-operation "dt" data body, mirroring the app's
+ * Utility.getDataForVehicleOperation + com/aeris/comms/protocol/mqtt/data/Data*
+ * builders. Operations absent here send no dt at all (the app passes an empty
+ * config map and PerformRO omits the key when empty).
+ *
+ * lights was being sent as the bare operation name with no dt, which is why it
+ * did not actuate from the dashboard: DataLights supplies {lct:"1", lt:"0"} and
+ * the Python client sends exactly that, with the car's lights confirmed
+ * physically flashing (mitsubishi_na/const.py RO_DATA).
+ *
+ * horn, doorLock, doorUnlock, locate and engineOff are confirmed to take no dt
+ * — their absence here is deliberate, not an omission. remoteAC's dt is built
+ * per-request by buildHvacExtra() from the dashboard's options.
+ */
+const OPERATION_DATA: Record<string, Record<string, unknown>> = {
+  lights: { lct: "1", lt: "0" },
+};
+
+/**
  * Cabin-comfort options, all carried inside ONE operation="remoteAC" request
  * over the same REST /avi/v3/remoteOperation endpoint as the simple commands.
  * CONFIRMED working live (2026-07-28): a real request with
@@ -105,28 +145,37 @@ const OPERATION_MAP: Record<string, string> = {
  * dashboard therefore collects the toggles locally and submits them together
  * as a single climate start.
  */
-const HVAC_OPTIONS: Record<string, { field: string; onValue: string; offValue: string }> = {
-  seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
-  seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
-  seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
-  seat_rr: { field: "rearRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
-  steering_heat: { field: "steeringHeaterControl", onValue: "TURN_ON", offValue: "TURN_OFF" },
-  defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
-  defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
+const HVAC_OPTIONS: Record<string, { field: string; onValue: string }> = {
+  seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON" },
+  seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON" },
+  seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON" },
+  seat_rr: { field: "rearRightSeatControl", onValue: "HEATER_ON" },
+  steering_heat: { field: "steeringHeaterControl", onValue: "TURN_ON" },
+  defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON" },
+  defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON" },
 };
 
 /**
- * fanMode is NOT the on/off toggle we assumed — it is a MODE with exactly two
- * legal wire values (FanMode.java): "VENT_FEET" (normal airflow) and "DEFROST"
- * (max-defrost airflow). "AUTO", which this Worker sent until now, does not
- * exist anywhere in the app; the server evidently ignored it silently, since
- * climate start still returned {"status":"Started"} either way. This is a
- * distinct capability from frontDefrostMode/rearDefrostMode (which toggle the
- * heated glass elements) — the app can and does combine them.
+ * fanMode has exactly two legal wire values (FanMode.java): "VENT_FEET"
+ * (normal airflow) and "DEFROST". "AUTO", which this Worker sent until now,
+ * does not exist anywhere in the app.
+ *
+ * DEFROST is NOT this vehicle's max-defrost signal, despite the name pairing.
+ * Decompiled BEClimatePresenter.onStartClicked(temp, isMaxDefrost) — the real
+ * handler for the max-defrost toggle — only ever writes fanMode:"DEFROST" /
+ * "VENT_FEET" inside the branch gated by VehicleExt.E(vehicle), which checks
+ * `model() == "RX"` exactly. Every other DEFROST/VENT_FEET assignment site in
+ * the app (RXClimateFragment, RXClimateScheduleListPresenter) is likewise
+ * RX-only. Our vehicle is model "DGE" (VehicleExt.C() lists DG/DGE/UT/RX/EX as
+ * separate, non-overlapping codes) — for it, `isMaxDefrost` only ever reaches
+ * `climateProperty.setIsDefrost(z10)`, i.e. the top-level `def` field; fanMode
+ * comes from the HVACSettings model, which nothing outside the RX classes ever
+ * sets to DEFROST. So for this vehicle fanMode is unconditionally "VENT_FEET"
+ * and max-defrost is carried by `def` alone — matching frontDefrostMode /
+ * rearDefrostMode, which stay separate HVACSettings fields regardless.
  */
 const MAX_DEFROST_OPTION = "max_defrost";
 const FAN_MODE_NORMAL = "VENT_FEET";
-const FAN_MODE_MAX_DEFROST = "DEFROST";
 
 /** Every option string the "climate" action will accept. */
 const CLIMATE_OPTION_KEYS = new Set([...Object.keys(HVAC_OPTIONS), MAX_DEFROST_OPTION]);
@@ -164,6 +213,22 @@ const MAX_HVAC_MINUTES = 30;
 
 /** Constant in the app's builder (DataRemoteAC:123). */
 const HVAC_POS = 1;
+
+/**
+ * Fallback "tmp" position when no posmap is available at all (fetch failed or
+ * the caller sent no temperature and login/identity lookup for the posmap
+ * itself failed). DataRemoteAC.a() ALWAYS calls put("tmp", ...) — there is no
+ * app code path that omits it. Confirmed live 2026-07-29: omitting `tmp`
+ * entirely (the previous behavior when temperatureC was null) gets the whole
+ * climate start rejected by the server with HTTP 400
+ * {"errorLabel":"InvalidParameterValue","errorDescription":"Invalid value for
+ * dt parameter in request"} — "no temperature specified" is not a state the
+ * real protocol supports, so this Worker cannot support it either. Position 16
+ * on this account's DGE posmap is 25.0C, matching the app's documented
+ * climate_default_temperature.
+ */
+const DEFAULT_HVAC_TEMP_C = 25;
+const FALLBACK_TMP_POS = 16;
 
 /**
  * Celsius -> tmp index, from the vehicle's own posmap.
@@ -232,35 +297,45 @@ export interface ClimateRequest {
 /**
  * Build the "dt" payload for a climate start, matching the app's builder.
  *
- * Every known option is written explicitly — selected ones to their onValue,
- * unselected ones to their offValue — so the resulting cabin state matches
- * exactly what the dashboard was showing when the button was pressed, rather
- * than inheriting leftovers from a previous run.
+ * Unselected options are OMITTED from hvacSettings entirely, not written to
+ * their offValue. This used to write every option explicitly (on the theory
+ * that it would keep cabin state from leaking forward between presses), but
+ * confirmed live 2026-07-29: a bare climate start with every HVAC_OPTIONS
+ * field forced to its offValue got the whole request rejected — HTTP 400
+ * {"errorLabel":"InvalidParameterValue","errorDescription":"Invalid value for
+ * dt parameter in request"}. mitsubishi_na/api.py's async_climate_start(),
+ * confirmed working end-to-end, only ever sets a field when the caller passes
+ * a non-None value for it and leaves everything else out of the dict, which
+ * is what this now matches. The vehicle evidently treats an omitted field as
+ * "off" on its own — the earlier "leftover state" concern was never observed
+ * and cost a hard rejection instead.
  */
 function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
   const selected = new Set(req.options);
   const hvacSettings: Record<string, unknown> = {
-    fanMode: selected.has(MAX_DEFROST_OPTION) ? FAN_MODE_MAX_DEFROST : FAN_MODE_NORMAL,
+    fanMode: FAN_MODE_NORMAL,
     operationTime: req.minutes,
     // The app's documented default (HVACSettingConstants.CHECK_NUMBER_DEFAULT).
     checkNumber: 75,
   };
   for (const [name, cfg] of Object.entries(HVAC_OPTIONS)) {
-    hvacSettings[cfg.field] = selected.has(name) ? cfg.onValue : cfg.offValue;
+    if (selected.has(name)) {
+      hvacSettings[cfg.field] = cfg.onValue;
+    }
   }
 
   const dt: Record<string, unknown> = {
     pos: HVAC_POS,
-    // Mirrors ClimateProperty.isDefrost() — a separate flag from the
-    // front/rearDefrostMode members inside hvacSettings.
-    def: selected.has("defrost_front") || selected.has("defrost_rear") ? 1 : 0,
+    // Mirrors ClimateProperty.isDefrost() / BEClimatePresenter.onStartClicked's
+    // isMaxDefrost param: the top-level max-defrost flag, independent of
+    // fanMode (see the fanMode comment above) and of the heated-glass
+    // hvacSettings.front/rearDefrostMode fields.
+    def: selected.has(MAX_DEFROST_OPTION) ? 1 : 0,
     hvacSettings,
   };
-  // Omitted when the posmap is unavailable: the server then applies its own
-  // default cabin temperature, which is strictly better than guessing an index.
-  if (req.posmap && req.temperatureC !== null) {
-    dt.tmp = celsiusToPos(req.posmap, req.temperatureC);
-  }
+  // tmp is mandatory (see FALLBACK_TMP_POS) — never omitted, even when the
+  // posmap couldn't be fetched.
+  dt.tmp = req.posmap && req.temperatureC !== null ? celsiusToPos(req.posmap, req.temperatureC) : FALLBACK_TMP_POS;
   return { dt };
 }
 
@@ -500,16 +575,39 @@ async function performOperation(
   env: Env,
   accessToken: string,
   vin: string,
-  pinToken: string,
+  pinToken: string | null,
   operation: string,
   extra?: Record<string, unknown>,
 ): Promise<unknown> {
+  // Per-operation dt body, unless the caller built one itself (remoteAC).
+  const data = extra ?? (OPERATION_DATA[operation] ? { dt: OPERATION_DATA[operation] } : undefined);
+
+  // FieldDelegateUA.getValue() (decompiled): "1" for operation "vehicleStatus",
+  // "android" for every other operation — and PerformRO always includes this
+  // field when the delegate returns non-null, which it always does. This
+  // Worker never sends vehicleStatus, so "android" is the correct constant
+  // here. Confirmed missing entirely from every request this Worker sent
+  // before this fix — untested whether the server actually enforces it, but
+  // the validated Python reference client (mitsubishi_na/api.py) always sends
+  // it and that is what's been confirmed working end-to-end live.
+  const userAgent = operation === "vehicleStatus" ? "1" : "android";
+
   const res = await fetch(BASE_URL + EP_PERFORM_RO, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
-    // forced:"true" matches the live app (C9337e passes z10=true) and is what
-    // we verified working end-to-end (lights, remoteAC) on 2026-07-28.
-    body: JSON.stringify({ vin, operation, forced: "true", pinToken, ...extra }),
+    // forced:"true" matches the live app (s/d.java's PerformRO forced flag)
+    // and is what we verified working end-to-end (lights, remoteAC) on
+    // 2026-07-28. pinToken is spread in only when the operation actually
+    // takes one, so the field is absent rather than null for the ops that
+    // do not.
+    body: JSON.stringify({
+      vin,
+      operation,
+      forced: "true",
+      ...(pinToken ? { pinToken } : {}),
+      ...data,
+      userAgent,
+    }),
   });
   if (!res.ok) {
     throw new ApiError(502, `Remote operation failed: HTTP ${res.status} ${await safeText(res)}`);
@@ -531,16 +629,43 @@ async function performOperation(
  * the GetROStatus call class (p331s.C9333a): eventId, vin, status, reasonCode,
  * operationType, errorLabel.
  *
- * Terminal-state classification mirrors VehicleOperationHttp.m3189x:
- *   successful | success | inqueue  -> succeeded
+ * Terminal-state classification, verified against the real app's own
+ * VehicleOperationHttp.x() (decompiled from My+Mitsubishi+Connect v2.88.10):
+ *   successful | success | inqueue  -> succeeded (all three unconditional —
+ *                                      the app's x() finalizes on any of them
+ *                                      with no reasonCode or operation check)
  *   failed | failure                -> failed
- *   MessageDelivered                -> succeeded (the vehicle ACKed the message;
- *                                      the app treats this as done for the
- *                                      operations it applies to)
+ *
+ * MessageDelivered is NOT unconditionally terminal in the real app either,
+ * despite first appearances. x() only treats it as success when y() or z12
+ * holds, and both are narrow: y() is true only for a "customize" preset-profile
+ * DELETE action, and z12 requires (operation == chargingControl2 ||
+ * operation == climateControl) AND reasonCode == "2002" exactly. None of the
+ * operations this worker sends (lock, unlock, horn, lights, locate, remoteAC,
+ * engineOff, chargingControl, chargingControlStop) ever satisfy either gate, so
+ * for every operation we use, the real app treats MessageDelivered as "still in
+ * flight" and keeps polling — confirmed live 2026-07-28, where a remoteAC sat at
+ * MessageDelivered (reasonCode 915) for 55s and then resolved to
+ * {"status":"Failed","errorLabel":"TimeframePassed"}. Classifying it as success
+ * here would have made the dashboard claim a command had landed when the car
+ * never applied it, which is worse than reporting a timeout.
+ *
  * Anything else is still in flight, so keep polling until the deadline.
+ *
+ * The 45s deadline used before was under-provisioned: that same run needed the
+ * full 60s to reach a terminal state, so a real outcome was being discarded as
+ * a timeout. 75s covers it with margin.
  */
 const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 45000;
+const POLL_TIMEOUT_MS = 75000;
+
+/**
+ * Shorter deadline for a precondition operation whose outcome only gates the
+ * next request. Every engineOff observed live went terminal on the first 5s
+ * poll, so this never actually waits long; it exists to bound the pathological
+ * case rather than to add latency to the common one.
+ */
+const PRECONDITION_POLL_TIMEOUT_MS = 20000;
 
 interface EventOutcome {
   outcome: "succeeded" | "failed" | "timeout";
@@ -550,10 +675,15 @@ interface EventOutcome {
   polls: number;
 }
 
-async function pollEvent(accessToken: string, vin: string, eventId: string): Promise<EventOutcome> {
+async function pollEvent(
+  accessToken: string,
+  vin: string,
+  eventId: string,
+  timeoutMs: number = POLL_TIMEOUT_MS,
+): Promise<EventOutcome> {
   const url = BASE_URL + EP_RO_STATUS.replace("{vin}", encodeURIComponent(vin)).replace("{eventId}", encodeURIComponent(eventId));
   const headers = sharedHeaders(`Bearer ${accessToken}`);
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
 
   let last: EventOutcome = { outcome: "timeout", status: null, reasonCode: null, errorLabel: null, polls: 0 };
 
@@ -576,7 +706,7 @@ async function pollEvent(accessToken: string, vin: string, eventId: string): Pro
     last.errorLabel = data.errorLabel ?? null;
 
     const s = data.status.toLowerCase();
-    if (s === "successful" || s === "success" || s === "inqueue" || s === "messagedelivered") {
+    if (s === "successful" || s === "success" || s === "inqueue") {
       return { ...last, outcome: "succeeded" };
     }
     if (s === "failed" || s === "failure") {
@@ -628,9 +758,59 @@ async function runCommand(
   const { accessToken } = await login(env);
   const vin = await getVin(env, accessToken);
   await wakeUpVehicle(accessToken, vin);
-  const pinToken = await verifyPin(env, accessToken, vin);
+  const pinToken = OPERATIONS_REQUIRING_PIN.has(operation)
+    ? await verifyPin(env, accessToken, vin)
+    : null;
   const submitted = await performOperation(env, accessToken, vin, pinToken, operation, extra);
 
+  const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
+  if (typeof eventId !== "string" || !eventId) {
+    return { eventId: null, submitted, event: null };
+  }
+  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
+}
+
+/**
+ * Climate start, with the running session torn down first.
+ *
+ * The vehicle allows exactly ONE active remoteAC session. A second remoteAC
+ * submitted while the first is still inside its operationTime window is
+ * accepted at the API ({"status":"Started"}) and then rejected by the car with
+ * {"status":"Failed","reasonCode":"1002","errorLabel":"RO_FAILURE_ALREADY_STARTED"};
+ * forced:"true" does NOT override it. Confirmed live 2026-07-28: six climate
+ * variants run back-to-back failed on exactly this, and the same six all
+ * succeeded once an engineOff was interleaved between them.
+ *
+ * runCommand() alone therefore only ever worked for the first press — every
+ * press for the next 10 minutes was rejected. So end any running session
+ * before starting the new one. An engineOff with nothing to stop answers
+ * RO_FAILURE_ALREADY_STOPPED, which is the expected no-op here and must not
+ * fail the start; its outcome is ignored on purpose.
+ *
+ * Login, VIN lookup and wakeup are shared across both operations rather than
+ * paying a second 25s wake settle for the stop. Neither remoteAC nor engineOff
+ * takes a pinToken (see OPERATIONS_REQUIRING_PIN).
+ */
+async function runClimateStart(
+  env: Env,
+  extra?: Record<string, unknown>,
+): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
+  const { accessToken } = await login(env);
+  const vin = await getVin(env, accessToken);
+  await wakeUpVehicle(accessToken, vin);
+
+  try {
+    const stopped = await performOperation(env, accessToken, vin, null, "engineOff");
+    const stopEventId = (stopped as { eventId?: unknown } | null)?.eventId;
+    if (typeof stopEventId === "string" && stopEventId) {
+      await pollEvent(accessToken, vin, stopEventId, PRECONDITION_POLL_TIMEOUT_MS);
+    }
+  } catch {
+    // Best-effort: a teardown that could not even be submitted should not block
+    // the start the caller actually asked for.
+  }
+
+  const submitted = await performOperation(env, accessToken, vin, null, "remoteAC", extra);
   const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
   if (typeof eventId !== "string" || !eventId) {
     return { eventId: null, submitted, event: null };
@@ -676,11 +856,16 @@ async function performChargingControl(
   const res = await fetch(url, {
     method: "POST",
     headers: sharedHeaders(`Bearer ${accessToken}`),
+    // userAgent: same FieldDelegateUA rule as performOperation() — this call
+    // never carries operation "vehicleStatus", so always "android". The DGE
+    // charging builder (s/c.java, PerformChargingStartAndStopRO) sends this
+    // field unconditionally too; it was missing here before this fix.
     body: JSON.stringify({
       vin,
       operation,
       operationType: 1,
       data: { eventTimestamp: isoEventTimestamp(), chargingControlType },
+      userAgent: "android",
     }),
   });
   if (!res.ok) {
@@ -1199,124 +1384,6 @@ function parseHeadlights(state: JsonValue): string {
   return flat !== undefined ? (toBool(flat) ? "on" : "off") : "off";
 }
 
-const TIRE_POS: Record<number, string> = { 0: "front_left", 1: "front_right", 2: "rear_left", 3: "rear_right" };
-
-/**
- * Newest VHR entry's diagnostic block (or the health payload itself as a
- * fallback). Ports _latest_vhr_diagnostic() from cron_log_status.py —
- * warnings/tires/firmware all read off this, not the top-level health blob.
- */
-function latestVhrDiagnostic(health: JsonValue): JsonValue {
-  if (health === null || typeof health !== "object" || Array.isArray(health)) return {};
-  const vhr = health["vhr"];
-  if (Array.isArray(vhr) && vhr.length > 0) {
-    let newest: JsonValue = vhr[0];
-    let newestTs = "";
-    for (const e of vhr) {
-      const ts = e !== null && typeof e === "object" && !Array.isArray(e) ? String(scalar(e["ts"]) ?? "") : "";
-      if (ts >= newestTs) { newestTs = ts; newest = e; }
-    }
-    const diag = findKey(newest, "diagnostic");
-    if (diag !== undefined && diag !== null && typeof diag === "object" && !Array.isArray(diag)) return diag;
-    return (newest !== null && typeof newest === "object" && !Array.isArray(newest)) ? newest : {};
-  }
-  const diag = findKey(health, "diagnostic");
-  return (diag !== undefined && diag !== null && typeof diag === "object" && !Array.isArray(diag)) ? diag : health;
-}
-
-/** Ports parse_warnings() from cron_log_status.py. Absent keys default to false. */
-function parseWarnings(health: JsonValue): Record<string, boolean> {
-  const diag = latestVhrDiagnostic(health);
-  return {
-    brake: toBool(firstPresent(diag, ["brakeFluidWarning", "brakeWarning", "brakeWarningLamp", "brakeAlert"])),
-    engine_oil: toBool(firstPresent(diag, [
-      "engineOilWarning", "oilWarning", "engineOilLevelWarning", "oilPressureWarning", "oilLevelWarning",
-    ])),
-    tire_pressure: toBool(firstPresent(diag, [
-      "tirePressureWarning", "tyrePressureWarning", "tpmsWarning", "lowTirePressureWarning", "tpmsAlert",
-    ])),
-    mil: toBool(firstPresent(diag, [
-      "malfunctionIndicatorLamp", "milStatus", "mil", "checkEngineWarning", "checkEngine",
-    ])),
-    abs: toBool(firstPresent(diag, ["absWarning", "antiLockBrakeWarning", "absWarningLamp", "absAlert"])),
-    airbag: toBool(firstPresent(diag, ["airbagWarning", "srsWarning", "airbagWarningLamp", "srsWarningLamp"])),
-  };
-}
-
-/** Ports parse_tires() from cron_log_status.py: VHR tireStatus.tires[] -> bar, 2dp. */
-function parseTiresPressure(health: JsonValue): Record<string, number | null> {
-  const diag = latestVhrDiagnostic(health);
-  const result: Record<string, number | null> = {
-    front_left: null, front_right: null, rear_left: null, rear_right: null,
-  };
-  const tireStatus = findKey(diag, "tireStatus");
-  let tires = tireStatus !== undefined && typeof tireStatus === "object" && !Array.isArray(tireStatus)
-    ? findKey(tireStatus, "tires") : undefined;
-  if (tires === undefined) tires = findKey(diag, "tires");
-  if (!Array.isArray(tires)) return result;
-  for (const tire of tires) {
-    if (tire === null || typeof tire !== "object" || Array.isArray(tire)) continue;
-    const pos = toInt(firstPresent(tire, ["position"]));
-    const kpa = toFloat(firstPresent(tire, ["pressureValue", "pressure", "pressureKpa", "tirePressure"]));
-    const key = pos !== null ? TIRE_POS[pos] : undefined;
-    if (key && kpa !== null) result[key] = Math.round((kpa / 100) * 100) / 100;
-  }
-  return result;
-}
-
-/** Ports parse_firmware() from cron_log_status.py. */
-function parseFirmware(health: JsonValue): string | null {
-  const v = scalar(firstPresent(health, [
-    "firmwareVersion", "swVersion", "softwareVersion", "fwVersion", "moduleFirmwareVersion",
-  ]));
-  return (v !== null && v !== undefined && v !== "") ? String(v) : null;
-}
-
-/** Ports _flatten_score_list() from mitsubishi_na/parsers.py. */
-function flattenScoreList(raw: JsonValue | undefined): Record<string, JsonValue> {
-  if (raw === undefined || raw === null) return {};
-  if (typeof raw === "object" && !Array.isArray(raw)) return raw;
-  if (Array.isArray(raw)) {
-    const flat: Record<string, JsonValue> = {};
-    for (const item of raw) {
-      if (item !== null && typeof item === "object" && !Array.isArray(item)) Object.assign(flat, item);
-    }
-    return flat;
-  }
-  return {};
-}
-
-/** Ports _score_value() from mitsubishi_na/parsers.py. */
-function scoreValue(entry: JsonValue | undefined): JsonValue {
-  if (entry === undefined) return null;
-  if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && "value" in entry) {
-    const v = entry["value"];
-    return v === undefined ? null : v;
-  }
-  return entry;
-}
-
-/**
- * Eco-driving score. Rides inside the same VHR (health) response already
- * fetched for tire/warnings/firmware -- not a separate endpoint or extra
- * round trip. Ports parse_driving_score() from mitsubishi_na/parsers.py.
- *
- * [UNVERIFIED] Field locations are inferred from decompiled classes, not a
- * confirmed live example -- expect nulls until validated against a real
- * account with driving history.
- */
-function parseDrivingScore(health: JsonValue): Record<string, JsonValue> {
-  const driving = flattenScoreList(findKey(health, "drivingScore"));
-  const fuelEconomyRaw = findKey(health, "fuelEconomyScore");
-  return {
-    overall_score: scoreValue(driving["overallScore"]),
-    acceleration_score: scoreValue(driving["accelScore"]),
-    steering_score: scoreValue(driving["steerScore"]),
-    braking_score: scoreValue(driving["brakeScore"]),
-    fuel_economy_score: scoreValue(fuelEconomyRaw),
-  };
-}
-
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
 async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
   const headers = sharedHeaders(`Bearer ${accessToken}`);
@@ -1354,10 +1421,6 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
     },
     doors: parseDoors(state),
     headlights: parseHeadlights(state),
-    tire_pressure_bar: parseTiresPressure(health ?? {}),
-    warnings: parseWarnings(health ?? {}),
-    firmware_version: parseFirmware(health ?? {}),
-    driving_score: parseDrivingScore(health ?? {}),
   };
 }
 
@@ -1654,30 +1717,32 @@ export default {
       const temperatureC =
         typeof rawTemp === "number" && Number.isFinite(rawTemp)
           ? Math.max(MIN_HVAC_TEMP_C, Math.min(MAX_HVAC_TEMP_C, rawTemp))
-          : null;
+          : DEFAULT_HVAC_TEMP_C;
       optionCount = options.length;
 
-      // The posmap turns degrees into the "tmp" position index. Best-effort:
-      // if it cannot be fetched we simply omit tmp and let the car use its own
-      // default, rather than failing the whole climate start over it.
+      // The posmap turns degrees into the "tmp" position index. tmp is
+      // mandatory on every climate start (see FALLBACK_TMP_POS), so this is
+      // always attempted now, not just when the caller supplied a
+      // temperature. Best-effort: if the fetch itself fails, buildHvacExtra
+      // falls back to FALLBACK_TMP_POS rather than failing the whole start.
       let posmap: PosMap | null = null;
-      if (temperatureC !== null) {
-        try {
-          const { accessToken } = await login(env);
-          const vin = await getVin(env, accessToken);
-          const identity = await fetchVehicleIdentity(accessToken, env.MMC_USERNAME, vin);
-          if (identity.model) {
-            posmap = (await fetchPosMap(accessToken, identity.model, identity.year, identity.country)).posmap;
-          }
-        } catch {
-          posmap = null;
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        const identity = await fetchVehicleIdentity(accessToken, env.MMC_USERNAME, vin);
+        if (identity.model) {
+          posmap = (await fetchPosMap(accessToken, identity.model, identity.year, identity.country)).posmap;
         }
+      } catch {
+        posmap = null;
       }
       extra = buildHvacExtra({ minutes, temperatureC, options, posmap });
     }
 
     try {
-      const { eventId, submitted, event } = await runCommand(env, operation, extra);
+      const { eventId, submitted, event } = isHvac
+        ? await runClimateStart(env, extra)
+        : await runCommand(env, operation, extra);
 
       // No eventId means the backend answered synchronously (some operations do)
       // — treat the accepted submission as the result rather than inventing one.
@@ -1688,6 +1753,26 @@ export default {
       const duration = isHvac
         ? ` for ${minutes} min${optionCount ? ` (+${optionCount} comfort option${optionCount === 1 ? "" : "s"})` : ""}`
         : "";
+
+      // Stopping a climate session that is not running answers
+      // RO_FAILURE_ALREADY_STOPPED (confirmed live 2026-07-28). The requested
+      // end state — climate off — already holds, so surfacing that as a red
+      // "rejected by vehicle" toast reports a failure that did not happen. It
+      // is a no-op, not an error. Same reasoning as the ALREADY_STARTED case in
+      // runClimateStart(), from the other direction.
+      const alreadyInEndState =
+        event.outcome === "failed" && event.errorLabel === "RO_FAILURE_ALREADY_STOPPED";
+      if (alreadyInEndState) {
+        return json({
+          success: true,
+          action,
+          outcome: "succeeded",
+          message: "Climate was already off.",
+          eventId,
+          event,
+        });
+      }
+
       const message =
         event.outcome === "succeeded"
           ? `'${action}' confirmed by vehicle${duration}.`
