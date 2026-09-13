@@ -364,76 +364,38 @@
           <span class="vehicle-live-state" id="vehicle-live-state">Waiting for report</span>
         </div>
 
-        <div class="vehicle-stage">
-          <svg class="vehicle-visual" viewBox="0 0 400 260" role="img" aria-labelledby="vehicle-visual-title vehicle-visual-desc">
-            <title id="vehicle-visual-title">Vehicle status visualization</title>
-            <desc id="vehicle-visual-desc">Waiting for the most recent vehicle report.</desc>
-            <defs>
-              <linearGradient id="vehicle-body-gradient" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0" stop-color="#aab2b8" />
-                <stop offset="1" stop-color="#4d555d" />
-              </linearGradient>
-              <linearGradient id="vehicle-glass-gradient" x1="0" x2="1" y1="0" y2="1">
-                <stop offset="0" stop-color="#bdeee8" stop-opacity=".75" />
-                <stop offset="1" stop-color="#1e2d38" stop-opacity=".96" />
-              </linearGradient>
-              <filter id="vehicle-blur" x="-40%" y="-40%" width="180%" height="180%">
-                <feGaussianBlur stdDeviation="5" />
-              </filter>
-            </defs>
-
-            <g class="vehicle-orbits" aria-hidden="true">
-              <ellipse cx="200" cy="132" rx="162" ry="103" />
-              <ellipse cx="200" cy="132" rx="135" ry="84" />
-            </g>
-            <ellipse class="vehicle-ground-shadow" cx="200" cy="139" rx="104" ry="100" aria-hidden="true" />
-            <g class="vehicle-charge-aura" aria-hidden="true">
-              <circle cx="200" cy="130" r="108" />
-              <circle cx="200" cy="130" r="91" />
-            </g>
-
-            <g class="vehicle-car" aria-hidden="true">
-              <path class="vehicle-light-beam vehicle-light-beam-left" d="M151 38 103 3 132 66z" />
-              <path class="vehicle-light-beam vehicle-light-beam-right" d="M249 38 297 3 268 66z" />
-              <path class="vehicle-shell" d="M200 22C244 22 270 43 282 83l15 68c7 33-7 66-37 79-35 15-85 15-120 0-30-13-44-46-37-79l15-68c12-40 38-61 82-61z" />
-              <path class="vehicle-roof" d="M200 52c29 0 48 14 58 43l8 31c4 17-5 40-22 50-24 14-48 14-72 0-17-10-26-33-22-50l8-31c10-29 29-43 58-43z" />
-              <path class="vehicle-glass" d="M200 66c24 0 39 12 47 37l6 23c3 13-5 29-18 37-21 12-49 12-70 0-13-8-21-24-18-37l6-23c8-25 23-37 47-37z" />
-              <path class="vehicle-windshield" d="M157 107c9-24 23-35 43-35s34 11 43 35c-26 9-60 9-86 0z" />
-              <path class="vehicle-rear-glass" d="M161 158c22 8 56 8 78 0-6 20-20 29-39 29s-33-9-39-29z" />
-              <path class="vehicle-centerline" d="M200 60v137" />
-
-              <g class="vehicle-door-svg vehicle-door-svg--front-left" data-vehicle-door="front_left">
-                <path d="M142 96c-16 10-23 31-22 52l5 27 29-5c-6-26-6-49 5-68z" />
-              </g>
-              <g class="vehicle-door-svg vehicle-door-svg--front-right" data-vehicle-door="front_right">
-                <path d="M258 96c16 10 23 31 22 52l-5 27-29-5c6-26 6-49-5-68z" />
-              </g>
-              <g class="vehicle-door-svg vehicle-door-svg--rear-left" data-vehicle-door="rear_left">
-                <path d="M125 178l6 25c7 18 20 27 37 31l-14-52z" />
-              </g>
-              <g class="vehicle-door-svg vehicle-door-svg--rear-right" data-vehicle-door="rear_right">
-                <path d="M275 178l-6 25c-7 18-20 27-37 31l14-52z" />
-              </g>
-
-              <g class="vehicle-wheels">
-                <rect x="104" y="89" width="19" height="48" rx="9.5" />
-                <rect x="277" y="89" width="19" height="48" rx="9.5" />
-                <rect x="111" y="165" width="19" height="48" rx="9.5" />
-                <rect x="270" y="165" width="19" height="48" rx="9.5" />
-              </g>
-              <g class="vehicle-lights">
-                <path class="vehicle-headlight" d="M163 40c8-5 17-7 26-8l-11 16-19 2z" />
-                <path class="vehicle-headlight" d="M237 40c-8-5-17-7-26-8l11 16 19 2z" />
-              </g>
-              <g class="vehicle-charge-port">
-                <circle cx="278" cy="177" r="5.5" />
-                <path class="vehicle-charge-flow" d="M308 177h30m-10-10 10 10-10 10" />
-              </g>
-            </g>
-          </svg>
+        <div class="vehicle-stage" role="img" aria-labelledby="vehicle-visual-title vehicle-visual-desc">
+          <span class="vehicle-visual-title" id="vehicle-visual-title">Live vehicle visual</span>
+          <p class="sr-only" id="vehicle-visual-desc">Waiting for the most recent vehicle report.</p>
+          <div class="vehicle-side-profile" aria-hidden="true">
+            <img src="assets/vehicle/dge-side.png" alt="" />
+          </div>
+          <div class="digital-twin" id="digital-twin" aria-hidden="true">
+            <span class="twin-radar twin-radar--one"></span>
+            <span class="twin-radar twin-radar--two"></span>
+            <span class="twin-ground-shadow"></span>
+            <span class="twin-command-ring"></span>
+            <span class="twin-locate-ping"></span>
+            <span class="twin-light-beam twin-light-beam--left"></span>
+            <span class="twin-light-beam twin-light-beam--right"></span>
+            <span class="twin-climate-wave twin-climate-wave--one"></span>
+            <span class="twin-climate-wave twin-climate-wave--two"></span>
+            <img class="digital-twin-base" src="assets/vehicle/dge-top.png" alt="" />
+            <img class="digital-twin-interior" src="assets/vehicle/dge-interior.png" alt="" />
+            <span class="twin-door twin-door--front-left" data-vehicle-door="front_left"></span>
+            <span class="twin-door twin-door--front-right" data-vehicle-door="front_right"></span>
+            <span class="twin-door twin-door--rear-left" data-vehicle-door="rear_left"></span>
+            <span class="twin-door twin-door--rear-right" data-vehicle-door="rear_right"></span>
+            <span class="twin-charge-port"></span>
+            <span class="twin-charge-flow"></span>
+            <span class="twin-command-label" id="vehicle-command-label" hidden></span>
+          </div>
           <div class="vehicle-energy" aria-label="Battery charge">
             <strong id="vehicle-hero-battery">—</strong><span id="vehicle-hero-battery-unit" hidden>%</span>
             <small>battery</small>
+          </div>
+          <div class="vehicle-access-glyph" id="vehicle-access-glyph" hidden aria-hidden="true">
+            <img id="door-state-glyph" src="assets/vehicle/doors_all_closed.png" alt="" />
           </div>
         </div>
 
@@ -441,8 +403,9 @@
           <div class="vehicle-signal" id="vehicle-access-signal"><span>Access</span><strong id="vehicle-access-state">Checking</strong></div>
           <div class="vehicle-signal" id="vehicle-lights-signal"><span>Lights</span><strong id="vehicle-lights-state">Checking</strong></div>
           <div class="vehicle-signal" id="vehicle-charge-signal"><span>Charge</span><strong id="vehicle-charge-state">Checking</strong></div>
+          <div class="vehicle-signal" id="vehicle-climate-signal"><span>Climate</span><strong id="vehicle-climate-state">Off</strong></div>
         </div>
-        <p class="vehicle-hero-note">Visualizes the last vehicle report. A command is only confirmed after the vehicle operation completes.</p>
+        <p class="vehicle-hero-note">Body, access and charge indicators use the last vehicle report. Climate and command motion only appear after a confirmed operation receipt.</p>
       </section>
 
     <!-- Stat tiles -->

@@ -281,10 +281,10 @@ button {
 .icon-btn.spinning { animation: spin 0.8s linear infinite; }
 
 /* ============================= VEHICLE STATUS VISUAL =============================
-   The dashboard used to lead with a decorative low-poly 3D car. It looked
-   different across phone GPUs and it was too easy to read its motion as live
-   telemetry. This SVG is lighter, always legible, and every animated part is
-   mapped to a named field in the latest vehicle report. */
+   The actual DGE car layers are taken from the companion app. Decorative
+   movement is deliberately split from telemetry: body/access/charge track a
+   report, while climate and remote-command motion only follows a confirmed
+   command receipt. */
 .vehicle-hero {
   position: relative;
   isolation: isolate;
@@ -344,43 +344,220 @@ button {
 
 .vehicle-stage {
   position: relative;
-  min-height: 210px;
+  min-height: 282px;
   margin: 0.1rem -0.2rem 0.3rem;
   display: grid;
   place-items: center;
+  overflow: hidden;
 }
-.vehicle-visual { width: min(100%, 330px); height: 218px; overflow: visible; }
-.vehicle-orbits ellipse { fill: none; stroke: rgba(232, 226, 214, 0.09); stroke-width: 1; stroke-dasharray: 3 7; }
-.vehicle-ground-shadow { fill: rgba(0,0,0,0.24); filter: url(#vehicle-blur); }
-.vehicle-charge-aura { opacity: 0; transform-origin: center; transition: opacity 280ms ease; }
-.vehicle-charge-aura circle { fill: none; stroke: var(--accent); stroke-width: 1.2; }
-.vehicle-charge-aura circle + circle { stroke: rgba(var(--accent-rgb), 0.5); stroke-dasharray: 4 7; }
-.vehicle-shell { fill: url(#vehicle-body-gradient); stroke: rgba(244,241,234,0.64); stroke-width: 1.2; }
-.vehicle-roof { fill: #272e35; stroke: rgba(244,241,234,0.18); stroke-width: 1; }
-.vehicle-glass { fill: url(#vehicle-glass-gradient); stroke: rgba(189,238,232,0.32); stroke-width: 1; }
-.vehicle-windshield, .vehicle-rear-glass { fill: rgba(8,20,28,0.66); stroke: rgba(189,238,232,0.22); stroke-width: 0.8; }
-.vehicle-centerline { fill: none; stroke: rgba(244,241,234,0.16); stroke-width: 1; stroke-dasharray: 3 5; }
-.vehicle-wheels rect { fill: #101317; stroke: rgba(244,241,234,0.1); stroke-width: 1; }
-.vehicle-door-svg { transform-box: fill-box; transform-origin: center; transition: transform 340ms cubic-bezier(.2,.8,.2,1); }
-.vehicle-door-svg path { fill: #68727c; stroke: rgba(244,241,234,0.45); stroke-width: 1; transition: fill 220ms ease, stroke 220ms ease, filter 220ms ease; }
-.vehicle-door-svg.is-unknown path { fill: rgba(104,114,124,0.28); stroke: rgba(232,226,214,0.2); stroke-dasharray: 2 3; }
-.vehicle-door-svg.is-open path { fill: #b84b56; stroke: #ff8b93; filter: drop-shadow(0 0 4px rgba(255,107,107,0.65)); }
-.vehicle-door-svg--front-left.is-open { transform: translate(-14px, -2px) rotate(-4deg); }
-.vehicle-door-svg--front-right.is-open { transform: translate(14px, -2px) rotate(4deg); }
-.vehicle-door-svg--rear-left.is-open { transform: translate(-12px, 3px) rotate(5deg); }
-.vehicle-door-svg--rear-right.is-open { transform: translate(12px, 3px) rotate(-5deg); }
-.vehicle-light-beam { fill: #fff0bb; opacity: 0; transition: opacity 240ms ease; filter: url(#vehicle-blur); }
-.vehicle-headlight { fill: #d8dde0; stroke: rgba(0,0,0,0.3); stroke-width: 0.6; transition: fill 240ms ease, filter 240ms ease; }
-.vehicle-charge-port circle { fill: #1d252b; stroke: var(--accent-dim); stroke-width: 1.2; transition: fill 200ms ease, stroke 200ms ease, filter 200ms ease; }
-.vehicle-charge-flow { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0; stroke-dasharray: 4 5; transition: opacity 200ms ease; }
-.vehicle-hero.lights-on .vehicle-light-beam { opacity: 0.64; }
-.vehicle-hero.lights-on .vehicle-headlight { fill: #fff6cb; filter: drop-shadow(0 0 5px rgba(255,240,187,0.75)); }
-.vehicle-hero.is-charging .vehicle-charge-aura { opacity: 0.7; animation: vehicle-charge-pulse 2.1s ease-in-out infinite; }
-.vehicle-hero.is-charging .vehicle-charge-port circle { fill: var(--accent); stroke: var(--accent-soft); filter: drop-shadow(0 0 5px var(--accent-glow)); }
-.vehicle-hero.is-charging .vehicle-charge-flow { opacity: 1; animation: vehicle-flow 800ms linear infinite; }
+.vehicle-visual-title,
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.vehicle-side-profile {
+  position: absolute;
+  right: -4.5rem;
+  bottom: -0.65rem;
+  z-index: 0;
+  width: min(118%, 432px);
+  opacity: 0.22;
+  filter: grayscale(.22) contrast(1.08) saturate(.72);
+  pointer-events: none;
+  transform: translateX(2.8rem);
+  transition: opacity 360ms ease, filter 360ms ease;
+}
+.vehicle-side-profile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(16,17,20,0.95), rgba(16,17,20,0.14) 55%, rgba(16,17,20,0.72));
+}
+.vehicle-side-profile img { display: block; width: 100%; height: auto; }
+.vehicle-hero.is-charging .vehicle-side-profile,
+.vehicle-hero.is-climate-running .vehicle-side-profile {
+  opacity: 0.35;
+  filter: grayscale(.12) contrast(1.14) saturate(.94) drop-shadow(0 0 22px rgba(var(--accent-rgb), .13));
+}
+.digital-twin {
+  position: relative;
+  z-index: 1;
+  width: auto;
+  height: clamp(234px, 63vw, 284px);
+  aspect-ratio: 590 / 1136;
+  isolation: isolate;
+  filter: drop-shadow(0 16px 19px rgba(0,0,0,.42));
+}
+.digital-twin::before {
+  content: "";
+  position: absolute;
+  z-index: -2;
+  inset: 14% -32%;
+  border: 1px solid rgba(var(--accent-rgb), .12);
+  border-radius: 50%;
+  box-shadow: 0 0 0 15px rgba(var(--accent-rgb), .025), 0 0 0 38px rgba(var(--accent-rgb), .015);
+}
+.digital-twin > img,
+.twin-radar,
+.twin-ground-shadow,
+.twin-command-ring,
+.twin-locate-ping,
+.twin-light-beam,
+.twin-climate-wave,
+.twin-door,
+.twin-charge-port,
+.twin-charge-flow,
+.twin-command-label { position: absolute; }
+.digital-twin-base,
+.digital-twin-interior { inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.digital-twin-base { z-index: 2; }
+.digital-twin-interior {
+  z-index: 3;
+  opacity: 0;
+  mix-blend-mode: screen;
+  filter: sepia(.72) saturate(2.8) hue-rotate(335deg) brightness(1.24);
+  transition: opacity 360ms ease, filter 360ms ease;
+}
+.twin-ground-shadow {
+  z-index: -1;
+  left: 16%; right: 16%; bottom: 3%; height: 15%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(0,0,0,.65), rgba(0,0,0,0));
+  filter: blur(9px);
+}
+.twin-radar {
+  z-index: -1;
+  left: 50%; top: 50%;
+  width: 80%; aspect-ratio: 1;
+  border: 1px dashed rgba(var(--accent-rgb), .22);
+  border-radius: 50%;
+  opacity: .5;
+  transform: translate(-50%, -50%);
+}
+.twin-radar--two { width: 108%; opacity: .18; border-style: solid; }
+.twin-command-ring,
+.twin-locate-ping {
+  z-index: 8;
+  left: 50%; top: 50%;
+  width: 18%; aspect-ratio: 1;
+  border: 2px solid var(--accent-soft);
+  border-radius: 50%;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(.5);
+  pointer-events: none;
+}
+.twin-light-beam {
+  z-index: 1;
+  top: 3.5%;
+  width: 25%; height: 25%;
+  opacity: 0;
+  background: linear-gradient(180deg, rgba(255,244,199,.65), rgba(255,224,124,0));
+  filter: blur(7px);
+  clip-path: polygon(42% 100%, 58% 100%, 100% 0, 0 0);
+  transform-origin: bottom center;
+  transition: opacity 220ms ease;
+}
+.twin-light-beam--left { left: 7%; transform: rotate(-8deg); }
+.twin-light-beam--right { right: 7%; transform: rotate(8deg); }
+.twin-climate-wave {
+  z-index: 4;
+  left: 24%; right: 24%;
+  height: 21%;
+  border: 1px solid rgba(255,139,75,.85);
+  border-radius: 50%;
+  opacity: 0;
+  box-shadow: 0 0 13px rgba(255,113,61,.33), inset 0 0 10px rgba(255,113,61,.2);
+  pointer-events: none;
+}
+.twin-climate-wave--one { top: 35%; }
+.twin-climate-wave--two { top: 52%; }
+.twin-door {
+  z-index: 5;
+  width: 17%; height: 19%;
+  opacity: 0;
+  border: 1px solid rgba(255,211,197,.88);
+  background: linear-gradient(145deg, rgba(255,121,87,.55), rgba(166,35,36,.28));
+  box-shadow: 0 0 11px rgba(255,82,70,.62), inset 0 0 7px rgba(255,255,255,.16);
+  transition: opacity 180ms ease, transform 480ms cubic-bezier(.16,.9,.18,1), filter 180ms ease;
+}
+.twin-door::after {
+  content: "";
+  position: absolute;
+  inset: 17% 20%;
+  border: 1px solid rgba(255,239,230,.52);
+  border-radius: inherit;
+}
+.twin-door.is-unknown { opacity: 0; }
+.twin-door.is-open { opacity: .98; animation: twin-door-open-glow 1.7s ease-in-out infinite; }
+.twin-door--front-left { left: 3%; top: 29%; border-radius: 72% 16% 18% 65%; transform-origin: 100% 48%; }
+.twin-door--front-right { right: 3%; top: 29%; border-radius: 16% 72% 65% 18%; transform-origin: 0 48%; }
+.twin-door--rear-left { left: 4%; top: 51%; border-radius: 62% 18% 24% 68%; transform-origin: 100% 50%; }
+.twin-door--rear-right { right: 4%; top: 51%; border-radius: 18% 62% 68% 24%; transform-origin: 0 50%; }
+.twin-door--front-left.is-open { transform: translate(-43%, -7%) rotate(-15deg); }
+.twin-door--front-right.is-open { transform: translate(43%, -7%) rotate(15deg); }
+.twin-door--rear-left.is-open { transform: translate(-40%, 8%) rotate(15deg); }
+.twin-door--rear-right.is-open { transform: translate(40%, 8%) rotate(-15deg); }
+.twin-charge-port {
+  z-index: 6;
+  right: 9.5%; top: 61.5%;
+  width: 8%; aspect-ratio: 1;
+  border: 1.5px solid var(--accent-dim);
+  border-radius: 50%;
+  background: rgba(7,14,17,.7);
+  transition: background 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+.twin-charge-flow {
+  z-index: 5;
+  top: 65%; right: -15%;
+  width: 29%; height: 2px;
+  opacity: 0;
+  background: repeating-linear-gradient(90deg, var(--accent) 0 5px, transparent 5px 10px);
+  box-shadow: 0 0 8px var(--accent-glow);
+  transform: rotate(-7deg);
+}
+.twin-command-label {
+  z-index: 12;
+  left: 50%; bottom: 8%;
+  min-width: max-content;
+  padding: .25rem .42rem;
+  border: 1px solid rgba(var(--accent-rgb), .46);
+  border-radius: 999px;
+  background: rgba(5,12,12,.84);
+  box-shadow: 0 4px 16px rgba(0,0,0,.38);
+  color: var(--accent-soft);
+  font-family: var(--font-mono);
+  font-size: .58rem;
+  letter-spacing: .04em;
+  transform: translateX(-50%);
+}
+.vehicle-hero.lights-on .twin-light-beam,
+.vehicle-hero.command-lights .twin-light-beam { opacity: .9; animation: twin-light-pulse 850ms ease-in-out infinite; }
+.vehicle-hero.is-charging .twin-charge-port {
+  border-color: var(--accent-soft);
+  background: var(--accent);
+  box-shadow: 0 0 13px var(--accent-glow);
+}
+.vehicle-hero.is-charging .twin-charge-flow { opacity: 1; animation: twin-charge-flow 760ms linear infinite; }
+.vehicle-hero.is-charging .twin-radar { border-color: rgba(var(--accent-rgb), .55); animation: twin-radar-pulse 2s ease-out infinite; }
+.vehicle-hero.is-climate-running .digital-twin-interior { opacity: .82; }
+.vehicle-hero.is-climate-running .twin-climate-wave { opacity: .78; animation: twin-climate-wave 1.55s ease-in-out infinite; }
+.vehicle-hero.is-climate-running .twin-climate-wave--two { animation-delay: .35s; }
+.vehicle-hero.command-lock .twin-command-ring,
+.vehicle-hero.command-unlock .twin-command-ring { opacity: 1; animation: twin-command-ring 1.05s cubic-bezier(.2,.78,.19,1) 2; }
+.vehicle-hero.command-unlock .twin-command-ring { border-color: var(--heat); }
+.vehicle-hero.command-locate .twin-locate-ping { opacity: 1; animation: twin-locate-ping 1s ease-out 3; }
+.vehicle-hero.command-horn .digital-twin { animation: twin-horn-shake .42s ease-in-out 3; }
 .vehicle-energy {
   position: absolute;
-  top: 50%; left: 50%;
+  z-index: 10;
+  top: 58%; left: 50%;
   display: grid;
   grid-template-columns: auto auto;
   align-items: baseline;
@@ -397,7 +574,22 @@ button {
 .vehicle-energy strong { color: var(--accent-soft); font-family: var(--font-display); font-size: 1.4rem; line-height: 0.9; }
 .vehicle-energy > span { color: var(--accent-soft); font-family: var(--font-mono); font-size: 0.68rem; }
 .vehicle-energy small { grid-column: 1 / -1; margin-top: 0.16rem; color: var(--text-dim); font-size: 0.54rem; letter-spacing: 0.07em; text-transform: uppercase; }
-.vehicle-signals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; }
+.vehicle-access-glyph {
+  position: absolute;
+  z-index: 10;
+  right: .1rem;
+  bottom: .55rem;
+  width: 45px;
+  height: 45px;
+  padding: .25rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(8,13,16,.74);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+.vehicle-access-glyph img { display: block; width: 100%; height: 100%; object-fit: contain; transition: opacity 120ms ease, transform 180ms ease; }
+.vehicle-access-glyph.is-changing img { opacity: .15; transform: scale(.76); }
+.vehicle-signals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.38rem; }
 .vehicle-signal { min-width: 0; padding: 0.5rem 0.52rem; border: 1px solid var(--border); border-radius: 10px; background: rgba(0,0,0,0.14); }
 .vehicle-signal span { display: block; overflow: hidden; color: var(--text-dim); font-size: 0.6rem; letter-spacing: 0.06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .vehicle-signal strong { display: block; overflow: hidden; margin-top: 0.16rem; color: var(--text-mid); font-family: var(--font-mono); font-size: 0.68rem; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
@@ -408,8 +600,14 @@ button {
 .vehicle-signal.is-alert { border-color: var(--danger-glow); }
 .vehicle-signal.is-alert strong { color: var(--danger); }
 .vehicle-hero-note { margin: 0.64rem 0 0; color: var(--text-dim); font-size: 0.64rem; line-height: 1.35; }
-@keyframes vehicle-charge-pulse { 0%, 100% { transform: scale(.96); opacity: .45; } 50% { transform: scale(1.04); opacity: .85; } }
-@keyframes vehicle-flow { to { stroke-dashoffset: -9; } }
+@keyframes twin-door-open-glow { 0%, 100% { filter: brightness(.95); } 50% { filter: brightness(1.24); } }
+@keyframes twin-light-pulse { 0%, 100% { filter: blur(7px) brightness(.86); } 50% { filter: blur(8px) brightness(1.32); } }
+@keyframes twin-charge-flow { to { background-position: -10px 0; } }
+@keyframes twin-radar-pulse { 0% { transform: translate(-50%, -50%) scale(.93); opacity: .9; } 100% { transform: translate(-50%, -50%) scale(1.08); opacity: .08; } }
+@keyframes twin-climate-wave { 0%, 100% { transform: scale(.92); opacity: .24; } 50% { transform: scale(1.08); opacity: .86; } }
+@keyframes twin-command-ring { 0% { transform: translate(-50%, -50%) scale(.35); opacity: 1; } 100% { transform: translate(-50%, -50%) scale(4.5); opacity: 0; } }
+@keyframes twin-locate-ping { 0% { transform: translate(-50%, -50%) scale(.25); opacity: 1; } 100% { transform: translate(-50%, -50%) scale(7); opacity: 0; } }
+@keyframes twin-horn-shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-3px) rotate(-.7deg); } 75% { transform: translateX(3px) rotate(.7deg); } }
 
 /* ============================= SECTION / PANEL ============================= */
 .panel {
@@ -602,6 +800,15 @@ button {
   background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.20), rgba(var(--accent-rgb), 0.06));
   box-shadow: 0 0 24px var(--accent-glow);
   color: var(--accent-soft);
+}
+/* The car is still conditioning, but the local controls now describe a
+   different next request. Keep the live state visible and make the update
+   requirement obvious instead of hiding Stop. */
+.climate-master.running.has-pending {
+  border-color: var(--heat);
+  background: linear-gradient(135deg, rgba(255,138,61,.16), rgba(var(--accent-rgb),.05));
+  box-shadow: 0 0 20px rgba(255,138,61,.23);
+  color: var(--heat);
 }
 
 /* Stop is a distinct action (operation "engineOff"), not a re-send of Start

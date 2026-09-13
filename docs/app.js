@@ -129,6 +129,30 @@
   // can be confirmed by the operation endpoint before the next status report
   // has reached the dashboard.
   var VEHICLE_DOOR_KEYS = ["front_left", "front_right", "rear_left", "rear_right"];
+  // These are the complete, app-provided four-door state illustrations. The
+  // dashboard only uses one once *all four* sensors have reported: showing a
+  // closed-car glyph for partial data would be worse than showing nothing.
+  var DOOR_GLYPH_BY_STATE = {
+    "": "doors_all_closed_white.png",
+    "front_left": "doors_frontleft_open.png",
+    "front_right": "doors_frontright_open.png",
+    "rear_left": "doors_rearleft_open.png",
+    "rear_right": "doors_rearright_open.png",
+    "front_left|front_right": "doors_frontleft_frontright_open.png",
+    "front_left|rear_left": "doors_frontleft_rearleft_open.png",
+    "front_left|rear_right": "doors_frontleft_rearright_open.png",
+    "front_right|rear_left": "doors_frontright_rearleft_open.png",
+    "front_right|rear_right": "doors_frontright_rearright_open.png",
+    "rear_left|rear_right": "doors_rearleft_rearright_open.png",
+    "front_left|front_right|rear_left": "doors_frontleft_frontright_rearleft_open.png",
+    "front_left|front_right|rear_right": "doors_frontleft_frontright_rearright_open.png",
+    "front_left|rear_left|rear_right": "doors_frontleft_rearleft_rearright_open.png",
+    "front_right|rear_left|rear_right": "doors_frontright_rearleft_rearright_open.png",
+    "front_left|front_right|rear_left|rear_right": "doors_all_open.png"
+  };
+  var vehicleClimate = { running: false, options: [] };
+  var doorGlyphTimer = null;
+  var commandVisualTimer = null;
   function isOn(value) { return value === true || value === "on" || value === "open"; }
   function isKnown(value) { return value !== null && value !== undefined && value !== ""; }
 
@@ -138,6 +162,79 @@
     var value = signal.querySelector("strong");
     if (value) value.textContent = text;
     signal.className = "vehicle-signal" + (state ? " " + state : "");
+  }
+
+  function renderDoorGlyph(doors, allReported) {
+    var root = document.getElementById("vehicle-access-glyph");
+    var image = document.getElementById("door-state-glyph");
+    if (!root || !image) return;
+    if (!allReported) {
+      root.hidden = true;
+      return;
+    }
+    var open = VEHICLE_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); });
+    var asset = DOOR_GLYPH_BY_STATE[open.join("|")];
+    if (!asset) { root.hidden = true; return; }
+    root.hidden = false;
+    var nextSrc = "assets/vehicle/" + asset;
+    if (image.getAttribute("src") === nextSrc) return;
+    clearTimeout(doorGlyphTimer);
+    root.classList.add("is-changing");
+    doorGlyphTimer = setTimeout(function () {
+      image.setAttribute("src", nextSrc);
+      root.classList.remove("is-changing");
+    }, 130);
+  }
+
+  // This is a command receipt visual, not a sensor reading. It is deliberately
+  // transient so a confirmed remote action can feel tangible without claiming
+  // that a later vehicle report has already caught up.
+  function setVehicleCommandFeedback(action, phase) {
+    var hero = document.getElementById("vehicle-hero");
+    var label = document.getElementById("vehicle-command-label");
+    if (!hero || !label) return;
+    var visualActions = ["lock", "unlock", "horn", "lights", "locate"];
+    visualActions.forEach(function (name) { hero.classList.remove("command-" + name); });
+    clearTimeout(commandVisualTimer);
+
+    if (phase === "sending") {
+      label.textContent = titleize(action) + "…";
+      label.hidden = false;
+      return;
+    }
+    if (phase === "pending") {
+      label.textContent = titleize(action) + " awaiting vehicle";
+      label.hidden = false;
+      commandVisualTimer = setTimeout(function () { label.hidden = true; }, 3200);
+      return;
+    }
+    if (phase === "failed") {
+      label.textContent = titleize(action) + " not confirmed";
+      label.hidden = false;
+      commandVisualTimer = setTimeout(function () { label.hidden = true; }, 3200);
+      return;
+    }
+    if (phase === "confirmed") {
+      if (visualActions.indexOf(action) !== -1) hero.classList.add("command-" + action);
+      label.textContent = titleize(action) + " confirmed";
+      label.hidden = false;
+      commandVisualTimer = setTimeout(function () {
+        visualActions.forEach(function (name) { hero.classList.remove("command-" + name); });
+        label.hidden = true;
+      }, 2800);
+    }
+  }
+
+  function setVehicleClimateState(running, options) {
+    vehicleClimate.running = !!running;
+    vehicleClimate.options = Array.isArray(options) ? options.slice() : [];
+    var hero = document.getElementById("vehicle-hero");
+    if (hero) hero.classList.toggle("is-climate-running", vehicleClimate.running);
+    setVehicleSignal(
+      "vehicle-climate-signal",
+      vehicleClimate.running ? "Running" : "Off",
+      vehicleClimate.running ? "is-charging" : ""
+    );
   }
 
   function renderVehicleVisual(latest) {
@@ -150,6 +247,7 @@
     var doorsReported = !!doors && Object.keys(doors).length > 0;
     var openDoors = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); }) : [];
     var reportedAccessCount = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isKnown(doors[key]); }).length : 0;
+    var allAccessReported = reportedAccessCount === VEHICLE_DOOR_KEYS.length;
     var accessText = !doorsReported ? "Not reported" : openDoors.length ? openDoors.length + " open" : reportedAccessCount === VEHICLE_DOOR_KEYS.length ? "All closed" : reportedAccessCount + " reported";
     var accessState = !doorsReported ? "" : (openDoors.length ? "is-alert" : "is-reported");
     setVehicleSignal("vehicle-access-signal", accessText, accessState);
@@ -160,6 +258,7 @@
       door.classList.toggle("is-open", known && isOn(doors[key]));
       door.classList.toggle("is-unknown", !known);
     });
+    renderDoorGlyph(doors || {}, allAccessReported);
 
     var lightsKnown = isKnown(latest.headlights);
     var lightsOn = lightsKnown && isOn(latest.headlights);
@@ -200,6 +299,12 @@
       }
     }
     hero.classList.toggle("has-open-access", openDoors.length > 0);
+    hero.classList.toggle("is-climate-running", vehicleClimate.running);
+    setVehicleSignal(
+      "vehicle-climate-signal",
+      vehicleClimate.running ? "Running" : "Off",
+      vehicleClimate.running ? "is-charging" : ""
+    );
     if (liveState) {
       liveState.className = "vehicle-live-state" + (stateClass ? " " + stateClass : "");
       liveState.textContent = stateText;
@@ -419,9 +524,12 @@
 
   async function sendCommand(action, btn) {
     setBtnBusy(btn, true, "loading");
+    setVehicleCommandFeedback(action, "sending");
     try {
-      var confirmed = reportCommand(action, await postCommand(action));
+      var result = await postCommand(action);
+      var confirmed = reportCommand(action, result);
       if (confirmed) {
+        setVehicleCommandFeedback(action, "confirmed");
         flashConfirmed(btn);
         // Poll said Successful, but that's the vehicle ACK, not necessarily
         // the sensor state yet — pull real status so doors/lights/lock
@@ -429,8 +537,12 @@
         // Reuses the same quiet (no toast, no error surfacing) refresh used
         // right after unlock.
         autoRefreshOnUnlock();
+      } else {
+        var body = (result && result.body) || {};
+        setVehicleCommandFeedback(action, result && result.ok && body.success ? "pending" : "failed");
       }
     } catch (e) {
+      setVehicleCommandFeedback(action, "failed");
       toast("Network error: " + e.message, "error");
     } finally {
       setBtnBusy(btn, false, "loading");
@@ -463,6 +575,7 @@
   var selectedTempC = 22;
   var selectedOptions = {};       // option string -> true
   var climateRunning = false;     // true only after a confirmed Start
+  var climateConfigDirty = false; // selected UI differs from a live session
   // The Worker owns the stop-then-start sequence. Keeping it server-side
   // prevents duplicate engineOff calls when a user changes a running session.
 
@@ -614,22 +727,38 @@
     }, minutes * 60 * 1000);
   }
 
-  // Any config change after a start drops us back to pending: the car is running
-  // the OLD config, so nothing should keep claiming the new selection is live.
+  // A config change does not stop the existing climate session. The controls
+  // become pending, but Stop stays available and the vehicle visual continues
+  // to show the last confirmed session until it ends or is explicitly stopped.
   function markPending() {
     if (!climateRunning) return;
-    climateRunning = false;
+    climateConfigDirty = true;
     if (climateStartBtn) {
-      climateStartBtn.classList.remove("running");
-      clearTimeout(climateStartBtn._runTimer);
+      climateStartBtn.classList.add("has-pending");
     }
-    if (climateStopBtn) climateStopBtn.hidden = true;
     Array.prototype.forEach.call(comfortButtons(), function (b) {
       clearTimeout(b._runTimer);
       b.classList.remove("running");
       // still-selected zones revert to armed (pending); deselected stay off
       if (selectedOptions[b.dataset.option]) b.classList.add("armed");
     });
+    startLabel("Update climate");
+  }
+
+  function clearClimateSession() {
+    climateRunning = false;
+    climateConfigDirty = false;
+    if (climateStartBtn) {
+      climateStartBtn.classList.remove("running", "has-pending");
+      clearTimeout(climateStartBtn._runTimer);
+    }
+    if (climateStopBtn) climateStopBtn.hidden = true;
+    Array.prototype.forEach.call(comfortButtons(), function (b) {
+      clearTimeout(b._runTimer);
+      b.classList.remove("running");
+      if (selectedOptions[b.dataset.option]) b.classList.add("armed");
+    });
+    setVehicleClimateState(false);
     startLabel("Start climate");
   }
 
@@ -641,12 +770,18 @@
     if (!climateStopBtn || climateStopBtn.disabled) return;
     climateStopBtn.disabled = true;
     climateStopBtn.classList.add("sending");
+    setVehicleCommandFeedback("climate_stop", "sending");
     try {
       var result = await postCommand("climate_stop");
       if (reportCommand("climate_stop", result)) {
-        markPending();
+        clearClimateSession();
+        setVehicleCommandFeedback("climate_stop", "confirmed");
+      } else {
+        var body = (result && result.body) || {};
+        setVehicleCommandFeedback("climate_stop", result && result.ok && body.success ? "pending" : "failed");
       }
     } catch (e) {
+      setVehicleCommandFeedback("climate_stop", "failed");
       toast("Network error: " + e.message, "error");
     } finally {
       climateStopBtn.classList.remove("sending");
@@ -734,6 +869,7 @@
     climateStartBtn.disabled = true;
     climateStartBtn.classList.add("sending");
     startLabel(climateRunning ? "Updating…" : "Starting…");
+    setVehicleCommandFeedback("climate", "sending");
     try {
       // runClimateStart() performs engineOff once, then remoteAC, using one
       // authenticated server-side flow. Do not send climate_stop here too.
@@ -741,14 +877,16 @@
       climateStartBtn.classList.remove("sending");
       if (reportCommand("climate", result)) {
         climateRunning = true;
+        climateConfigDirty = false;
         climateStartBtn.classList.add("running");
+        climateStartBtn.classList.remove("has-pending");
         if (climateStopBtn) climateStopBtn.hidden = false;
         startLabel("Climate running");
+        setVehicleClimateState(true, options);
+        setVehicleCommandFeedback("climate", "confirmed");
         clearTimeout(climateStartBtn._runTimer);
         climateStartBtn._runTimer = setTimeout(function () {
-          climateRunning = false;
-          climateStartBtn.classList.remove("running");
-          startLabel("Start climate");
+          clearClimateSession();
         }, minutes * 60 * 1000);
         Array.prototype.forEach.call(comfortButtons(), function (b) {
           if (selectedOptions[b.dataset.option]) markRunningFor(b, minutes);
@@ -757,13 +895,14 @@
         // The stop (if any) succeeded but the restart didn't -- the car is
         // now actually off, so reflect that instead of leaving stale
         // "running" UI behind.
-        climateRunning = false;
-        if (climateStopBtn) climateStopBtn.hidden = true;
-        startLabel("Start climate");
+        clearClimateSession();
+        var body = (result && result.body) || {};
+        setVehicleCommandFeedback("climate", result && result.ok && body.success ? "pending" : "failed");
       }
     } catch (e) {
       climateStartBtn.classList.remove("sending");
-      startLabel(climateRunning ? "Climate running" : "Start climate");
+      startLabel(climateRunning ? (climateConfigDirty ? "Update climate" : "Climate running") : "Start climate");
+      setVehicleCommandFeedback("climate", "failed");
       toast("Network error: " + e.message, "error");
     } finally {
       climateStartBtn.disabled = false;
