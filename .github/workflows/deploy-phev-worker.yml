@@ -1,10 +1,11 @@
-name: Deploy PHEV command relay
+name: Validate PHEV command relay
 
 on:
   push:
     branches: [main]
     paths:
       - cloudflare-worker/**
+      - wrangler.toml
       - .github/workflows/deploy-phev-worker.yml
   workflow_dispatch:
 
@@ -12,11 +13,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-phev-command-relay
+  group: validate-phev-command-relay
   cancel-in-progress: true
 
+# Cloudflare Workers Builds owns production deployment through its Git integration.
+# GitHub Actions only verifies the code before Cloudflare publishes it.
 jobs:
-  deploy:
+  validate:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,7 +35,3 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

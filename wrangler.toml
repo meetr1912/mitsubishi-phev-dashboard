@@ -1,0 +1,6 @@
+# Cloudflare Workers Builds is configured with this repository's root directory.
+# This entrypoint lets its default `npx wrangler deploy` command resolve the
+# Worker source kept in cloudflare-worker/.
+name = "phev-command-relay"
+main = "cloudflare-worker/src/index.ts"
+compatibility_date = "2025-07-01"
