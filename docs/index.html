@@ -497,6 +497,18 @@
         </button>
       </div>
 
+      <!-- Populated from GET /config after unlock. “Reported” means the
+           vehicle itself exposed that control in its remoteAC settings;
+           “confirmed” is reserved for an operation result from the vehicle. -->
+      <div class="vehicle-support" id="vehicle-support" aria-live="polite">
+        <span class="vehicle-support-status" id="vehicle-support-status">Checking vehicle support…</span>
+        <div class="vehicle-support-chips" id="vehicle-support-chips" hidden></div>
+      </div>
+      <details class="service-discovery" id="service-discovery" hidden>
+        <summary id="service-discovery-summary">API-reported services</summary>
+        <div class="vehicle-support-chips" id="service-discovery-chips"></div>
+      </details>
+
       <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
         <svg aria-hidden="true"><use href="#icon-fan" /></svg>
         <span class="climate-master-label">Start climate</span>
@@ -563,6 +575,7 @@
         <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg> Start charge</button>
         <button class="cmd-btn" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg> Stop charge</button>
       </div>
+      <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
     </section>
 
     <!-- Charging schedule (operation "chargingControl2") — the vehicle always

@@ -288,9 +288,27 @@
     return postCommandBody({ action: action });
   }
 
+  // “Confirmed” is only used after the remote-operation poll reaches the
+  // vehicle's successful terminal state. “Submitted” and “timed out” remain
+  // visibly distinct so the dashboard never overclaims that a button worked.
+  var commandReceiptEl = document.getElementById("command-receipt");
+  function renderCommandReceipt(action, result) {
+    if (!commandReceiptEl || !result) return;
+    var body = result.body || {};
+    var outcome = body.outcome || "";
+    var kind = (result.ok && body.success && outcome === "succeeded")
+      ? "confirmed"
+      : (result.ok && body.success ? "submitted" : "rejected");
+    var text = body.message || body.error || (titleize(action) + " could not be confirmed.");
+    commandReceiptEl.hidden = false;
+    commandReceiptEl.className = "command-receipt " + kind;
+    commandReceiptEl.textContent = text;
+  }
+
   function reportCommand(action, result) {
     if (!result) return false;
     var body = result.body || {};
+    renderCommandReceipt(action, result);
     if (result.ok && body.success) {
       toast(body.message || (titleize(action) + " sent."), body.outcome === "timeout" ? "info" : "success");
       return body.outcome !== "timeout";
@@ -360,6 +378,22 @@
   var climateStartBtn = document.getElementById("climate-start");
   var climateStopBtn = document.getElementById("climate-stop");
   var tempValueEl = document.getElementById("temp-value");
+  var vehicleSupportStatusEl = document.getElementById("vehicle-support-status");
+  var vehicleSupportChipsEl = document.getElementById("vehicle-support-chips");
+  var serviceDiscoveryEl = document.getElementById("service-discovery");
+  var serviceDiscoverySummaryEl = document.getElementById("service-discovery-summary");
+  var serviceDiscoveryChipsEl = document.getElementById("service-discovery-chips");
+
+  var CLIMATE_OPTION_LABELS = {
+    seat_fl: "Front-left seat",
+    seat_fr: "Front-right seat",
+    seat_rl: "Rear-left seat",
+    seat_rr: "Rear-right seat",
+    steering_heat: "Wheel heat",
+    defrost_front: "Front defrost",
+    defrost_rear: "Rear defrost",
+    max_defrost: "Max defrost"
+  };
 
   function comfortButtons() {
     return climatePanel ? climatePanel.querySelectorAll(".comfort-toggle") : [];
@@ -375,10 +409,78 @@
     tempValueEl.textContent = txt + "°C";
   }
 
-  // The selectable range belongs to the car, not to this code. /config reports
-  // it, so a different vehicle or a firmware change widens the stepper without
-  // a redeploy. Silent and best-effort: on any failure the values read off this
-  // vehicle's posmap stay in force.
+  function addSupportChip(root, text, state) {
+    if (!root) return;
+    var chip = document.createElement("span");
+    chip.className = "vehicle-support-chip " + state;
+    chip.textContent = text;
+    root.appendChild(chip);
+  }
+
+  function setOptionAvailability(btn, available) {
+    if (!btn) return;
+    var option = btn.dataset.option;
+    btn.disabled = !available;
+    btn.classList.toggle("not-supported", !available);
+    if (!available) {
+      delete selectedOptions[option];
+      btn.setAttribute("aria-pressed", "false");
+      btn.classList.remove("armed", "running");
+      btn.title = "Not reported by this vehicle";
+    } else {
+      btn.removeAttribute("title");
+    }
+  }
+
+  // Use only a positive, vehicle-reported capability response to disable a
+  // control. A failed or unfamiliar response leaves the controls available:
+  // lack of evidence is not evidence of lack of support.
+  function renderVehicleSupport(config) {
+    var hvac = config && config.capabilities && config.capabilities.hvac;
+    var reported = hvac && hvac.availability === "reported" && Array.isArray(hvac.supported);
+    var supported = reported ? new Set(hvac.supported) : null;
+
+    if (reported) {
+      Array.prototype.forEach.call(comfortButtons(), function (btn) {
+        var option = btn.dataset.option;
+        // Mitsubishi carries this as dt.def, not inside remoteAC settings, so
+        // it has no per-control availability field to check.
+        if (option === "max_defrost") return;
+        setOptionAvailability(btn, supported.has(option));
+      });
+
+      if (vehicleSupportStatusEl) {
+        vehicleSupportStatusEl.textContent = "Vehicle-reported climate support";
+      }
+      if (vehicleSupportChipsEl) {
+        vehicleSupportChipsEl.hidden = false;
+        vehicleSupportChipsEl.textContent = "";
+        VALID_OPTIONS.forEach(function (option) {
+          var state = option === "max_defrost" ? "protocol" : (supported.has(option) ? "supported" : "unsupported");
+          var suffix = state === "supported" ? " · reported" : state === "unsupported" ? " · unavailable" : " · separate mode";
+          addSupportChip(vehicleSupportChipsEl, CLIMATE_OPTION_LABELS[option] + suffix, state);
+        });
+      }
+    } else if (vehicleSupportStatusEl) {
+      vehicleSupportStatusEl.textContent = "Vehicle support was not reported; controls remain available.";
+    }
+
+    var services = config && Array.isArray(config.services) ? config.services : [];
+    if (serviceDiscoveryEl && serviceDiscoverySummaryEl && serviceDiscoveryChipsEl) {
+      serviceDiscoveryChipsEl.textContent = "";
+      serviceDiscoveryEl.hidden = services.length === 0;
+      if (services.length) {
+        serviceDiscoverySummaryEl.textContent = "API-reported services (" + services.length + ")";
+        services.forEach(function (service) {
+          addSupportChip(serviceDiscoveryChipsEl, titleize(service), "service");
+        });
+      }
+    }
+  }
+
+  // /config describes the vehicle's temperature grid, reported optional HVAC
+  // controls, and advertised services. This remains silent/best-effort: a
+  // failed read must not block climate or turn unknown support into “off”.
   async function loadTempRange() {
     var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
     if (!key) return;
@@ -386,8 +488,16 @@
       var res = await fetch(CONFIG.WORKER_URL + "/config", {
         headers: { "X-Dashboard-Key": key }
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderVehicleSupport(null);
+        return;
+      }
       var body = await res.json();
+      if (!body || !body.success) {
+        renderVehicleSupport(null);
+        return;
+      }
+      renderVehicleSupport(body);
       var t = body && body.temperature;
       if (!t || typeof t.minC !== "number" || typeof t.maxC !== "number") return;
       if (t.maxC <= t.minC) return;
@@ -397,7 +507,7 @@
       if (selectedTempC < TEMP_MIN) selectedTempC = TEMP_MIN;
       if (selectedTempC > TEMP_MAX) selectedTempC = TEMP_MAX;
       renderTemp();
-    } catch (e) { /* keep the built-in range */ }
+    } catch (e) { renderVehicleSupport(null); }
   }
 
   // A confirmed-running comfort zone stays lit for the chosen duration then
@@ -467,9 +577,12 @@
     selectedTempC = Math.round(selectedTempC / TEMP_STEP) * TEMP_STEP;
     selectedTempC = Math.round(selectedTempC * 10) / 10;
     selectedOptions = {};
-    preset.options.forEach(function (opt) { selectedOptions[opt] = true; });
+    preset.options.forEach(function (opt) {
+      var button = climatePanel && climatePanel.querySelector('[data-option="' + opt + '"]');
+      if (!button || !button.disabled) selectedOptions[opt] = true;
+    });
     Array.prototype.forEach.call(comfortButtons(), function (btn) {
-      var on = !!selectedOptions[btn.dataset.option];
+      var on = !btn.disabled && !!selectedOptions[btn.dataset.option];
       btn.setAttribute("aria-pressed", on ? "true" : "false");
       btn.classList.remove("running");
       btn.classList.toggle("armed", on);
@@ -480,7 +593,7 @@
 
   function toggleOption(btn) {
     var opt = btn.dataset.option;
-    if (VALID_OPTIONS.indexOf(opt) === -1) return;
+    if (btn.disabled || VALID_OPTIONS.indexOf(opt) === -1) return;
     var on = !selectedOptions[opt];
     if (on) { selectedOptions[opt] = true; } else { delete selectedOptions[opt]; }
     btn.setAttribute("aria-pressed", on ? "true" : "false");

@@ -571,6 +571,12 @@ button {
   box-shadow: 0 0 18px var(--heat-glow);
   animation: pulse-heat 1.6s ease-in-out infinite;
 }
+.comfort-toggle.not-supported,
+.comfort-toggle.not-supported:disabled {
+  cursor: not-allowed;
+  opacity: 0.34;
+  filter: grayscale(0.8);
+}
 
 .hvac-row {
   display: grid;
@@ -605,6 +611,49 @@ button {
   box-shadow: 0 0 16px var(--heat-glow);
   animation: pulse-heat 1.6s ease-in-out infinite;
 }
+
+/* The vehicle-support block separates API-reported availability from an
+   actual command confirmation. It is deliberately compact: the controls stay
+   the primary interaction surface. */
+.vehicle-support {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.vehicle-support-status {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  margin-bottom: 0.5rem;
+}
+.vehicle-support-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.vehicle-support-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.2rem 0.46rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: rgba(255,255,255,0.02);
+  font-size: 0.64rem;
+  line-height: 1.1;
+}
+.vehicle-support-chip.supported { border-color: var(--accent-dim); color: var(--accent-soft); }
+.vehicle-support-chip.unsupported { border-color: rgba(255, 107, 107, 0.32); color: var(--danger); }
+.vehicle-support-chip.protocol { border-color: rgba(255, 138, 61, 0.42); color: var(--heat); }
+.vehicle-support-chip.service { color: var(--text-mid); }
+.service-discovery {
+  margin-top: 0.7rem;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+.service-discovery summary { cursor: pointer; }
+.service-discovery .vehicle-support-chips { margin-top: 0.55rem; }
 
 @keyframes pulse-heat {
   0%, 100% { box-shadow: 0 0 10px var(--heat-glow); }
@@ -674,6 +723,19 @@ button {
   box-shadow: 0 0 0 1px var(--success), 0 0 16px var(--accent-glow);
 }
 .cmd-btn.confirmed svg { color: var(--success); }
+.command-receipt {
+  margin: 0.8rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.02);
+  color: var(--text-mid);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+.command-receipt.confirmed { border-color: var(--accent-dim); color: var(--accent-soft); }
+.command-receipt.submitted { border-color: rgba(255, 138, 61, 0.4); color: var(--heat); }
+.command-receipt.rejected { border-color: rgba(255, 107, 107, 0.45); color: var(--danger); }
 .spinner {
   width: 14px; height: 14px;
   border: 2px solid rgba(255,255,255,0.15);

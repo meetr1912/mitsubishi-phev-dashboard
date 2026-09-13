@@ -322,6 +322,37 @@ async function getAvailableHvacOptions(accessToken: string, vin: string): Promis
 }
 
 /**
+ * A safe, dashboard-facing summary of the controls the vehicle actually
+ * reports through its remoteAC settings. `unknown` is deliberately distinct
+ * from an empty list: an unfamiliar response shape must never cause the UI to
+ * hide controls that may still work.
+ */
+function summarizeHvacCapabilities(available: ReadonlySet<string> | null): {
+  availability: "reported" | "unknown";
+  supported: string[];
+  unavailable: string[];
+  separatelyReported: string[];
+} {
+  if (available === null) {
+    return {
+      availability: "unknown",
+      supported: [],
+      unavailable: [],
+      // Max defrost is carried by the top-level `dt.def` flag, rather than an
+      // hvacSettings field, so remoteAC settings cannot report it separately.
+      separatelyReported: [MAX_DEFROST_OPTION],
+    };
+  }
+  const supported = [...available].sort();
+  return {
+    availability: "reported",
+    supported,
+    unavailable: Object.keys(HVAC_OPTIONS).filter((name) => !available.has(name)),
+    separatelyReported: [MAX_DEFROST_OPTION],
+  };
+}
+
+/**
  * Build the "dt" payload for a climate start, matching the app's builder.
  *
  * On the verified v2.90.10 client, every available control is explicitly sent
@@ -1549,9 +1580,13 @@ export default {
         if (!identity.model) {
           return json({ success: false, error: "Could not resolve vehicle model", identity }, 502);
         }
-        const { posmap, raw } = await fetchPosMap(
-          accessToken, identity.model, identity.year, identity.country,
-        );
+        // These two reads are independent. The model configuration explains
+        // the temperature grid and advertised services; remoteAC settings are
+        // the vehicle-specific source of truth for optional HVAC controls.
+        const [{ posmap, raw }, availableHvacOptions] = await Promise.all([
+          fetchPosMap(accessToken, identity.model, identity.year, identity.country),
+          getAvailableHvacOptions(accessToken, vin),
+        ]);
         return json({
           success: true,
           identity: { model: identity.model, year: identity.year, country: identity.country },
@@ -1567,7 +1602,14 @@ export default {
                   .sort((a, b) => a - b),
               }
             : null,
-          services: extractServices(raw),
+          // Do not expose raw Mitsubishi responses to the browser. This is
+          // enough for the UI to show what the vehicle reports and gives us a
+          // conservative discovery list for future, separately-validated
+          // controls.
+          capabilities: {
+            hvac: summarizeHvacCapabilities(availableHvacOptions),
+          },
+          services: [...new Set(extractServices(raw))].sort(),
         });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
