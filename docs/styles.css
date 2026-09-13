@@ -432,6 +432,31 @@ button {
   font-weight: 600;
 }
 
+.climate-presets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.45rem;
+  margin: 0.1rem 0 0.45rem;
+}
+.climate-preset {
+  min-height: 44px;
+  padding: 0.5rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.02);
+  color: var(--text-mid);
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+.climate-preset--clear { border-color: var(--heat); color: var(--heat); }
+.climate-preset:active { transform: scale(0.97); }
+.climate-preset-hint {
+  margin: 0 0 1rem;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
 .climate-master {
   width: 100%;
   display: flex;
