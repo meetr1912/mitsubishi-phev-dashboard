@@ -353,14 +353,8 @@
   var selectedTempC = 22;
   var selectedOptions = {};       // option string -> true
   var climateRunning = false;     // true only after a confirmed Start
-  // Separate from climateRunning: the vehicle allows exactly one active
-  // remoteAC session. climateRunning gets cleared the instant any setting
-  // changes (markPending, below) so the UI stops claiming the OLD config is
-  // still live -- but the car doesn't know that. sessionOnVehicle tracks the
-  // real backend state and is cleared only by a confirmed climate_stop (or
-  // the session's own duration elapsing), so startClimate() knows whether it
-  // needs to stop the old session before submitting a new one.
-  var sessionOnVehicle = false;
+  // The Worker owns the stop-then-start sequence. Keeping it server-side
+  // prevents duplicate engineOff calls when a user changes a running session.
 
   var climatePanel = document.getElementById("climate-panel");
   var climateStartBtn = document.getElementById("climate-start");
@@ -449,7 +443,6 @@
       var result = await postCommand("climate_stop");
       if (reportCommand("climate_stop", result)) {
         markPending();
-        sessionOnVehicle = false;
       }
     } catch (e) {
       toast("Network error: " + e.message, "error");
@@ -457,6 +450,32 @@
       climateStopBtn.classList.remove("sending");
       climateStopBtn.disabled = false;
     }
+  }
+
+  var CLIMATE_PRESETS = {
+    cabin_heat: { temperatureC: 24, options: [] },
+    clear_windshield: { temperatureC: 28, options: ["max_defrost", "defrost_front"] },
+    rear_glass: { temperatureC: 22, options: ["defrost_rear"] }
+  };
+
+  // Presets make the vehicle-level modes explicit. They only populate the
+  // local selection; Start climate remains the one intentional remote action.
+  function applyClimatePreset(name) {
+    var preset = CLIMATE_PRESETS[name];
+    if (!preset) return;
+    selectedTempC = Math.max(TEMP_MIN, Math.min(TEMP_MAX, preset.temperatureC));
+    selectedTempC = Math.round(selectedTempC / TEMP_STEP) * TEMP_STEP;
+    selectedTempC = Math.round(selectedTempC * 10) / 10;
+    selectedOptions = {};
+    preset.options.forEach(function (opt) { selectedOptions[opt] = true; });
+    Array.prototype.forEach.call(comfortButtons(), function (btn) {
+      var on = !!selectedOptions[btn.dataset.option];
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.classList.remove("running");
+      btn.classList.toggle("armed", on);
+    });
+    renderTemp();
+    markPending();
   }
 
   function toggleOption(btn) {
@@ -509,34 +528,20 @@
 
     climateStartBtn.disabled = true;
     climateStartBtn.classList.add("sending");
-    startLabel(sessionOnVehicle ? "Updating…" : "Starting…");
+    startLabel(climateRunning ? "Updating…" : "Starting…");
     try {
-      // The vehicle allows exactly one active remoteAC session -- confirmed
-      // live, a second climate_start while one is already running is
-      // rejected outright (RO_FAILURE_ALREADY_STARTED), even with
-      // forced:"true". So a setting change mid-session has to stop the old
-      // session before the new one can start; done here so it's still one
-      // button press for the user instead of a confusing rejection.
-      if (sessionOnVehicle) {
-        var stopResult = await postCommand("climate_stop");
-        if (!reportCommand("climate_stop", stopResult)) {
-          startLabel("Climate running");
-          return;
-        }
-        sessionOnVehicle = false;
-      }
+      // runClimateStart() performs engineOff once, then remoteAC, using one
+      // authenticated server-side flow. Do not send climate_stop here too.
       var result = await postCommandBody(payload);
       climateStartBtn.classList.remove("sending");
       if (reportCommand("climate", result)) {
         climateRunning = true;
-        sessionOnVehicle = true;
         climateStartBtn.classList.add("running");
         if (climateStopBtn) climateStopBtn.hidden = false;
         startLabel("Climate running");
         clearTimeout(climateStartBtn._runTimer);
         climateStartBtn._runTimer = setTimeout(function () {
           climateRunning = false;
-          sessionOnVehicle = false;
           climateStartBtn.classList.remove("running");
           startLabel("Start climate");
         }, minutes * 60 * 1000);
@@ -553,7 +558,7 @@
       }
     } catch (e) {
       climateStartBtn.classList.remove("sending");
-      startLabel(sessionOnVehicle ? "Climate running" : "Start climate");
+      startLabel(climateRunning ? "Climate running" : "Start climate");
       toast("Network error: " + e.message, "error");
     } finally {
       climateStartBtn.disabled = false;
@@ -563,6 +568,8 @@
   // One delegated listener on #climate-panel routes every control.
   if (climatePanel) {
     climatePanel.addEventListener("click", function (e) {
+      var preset = e.target.closest(".climate-preset");
+      if (preset) { applyClimatePreset(preset.dataset.preset); return; }
       var toggle = e.target.closest(".comfort-toggle");
       if (toggle) { toggleOption(toggle); return; }
       var dur = e.target.closest(".duration-opt");
