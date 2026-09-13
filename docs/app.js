@@ -116,6 +116,10 @@
       // Prefills the charging-schedule editor with whatever is already
       // configured on the vehicle, so Save doesn't silently overwrite it.
       loadChargingSchedule();
+      // Climate scheduling uses a different Mitsubishi service. It has to be
+      // read before the UI becomes writable, because the Worker preserves the
+      // vehicle's saved temperature and equipment-specific HVAC settings.
+      loadClimateSchedule();
     }
   }
 
@@ -1003,6 +1007,147 @@
       if (day) { day.classList.toggle("active"); return; }
       var save = e.target.closest("#schedule-save");
       if (save) { saveSchedule(); return; }
+    });
+  }
+
+  // ---- climate schedule (operation "climateControl") ----
+  // Mitsubishi calls the time an endTimeOfDay, but the app's own wording is
+  // departure / "ready by": it decides when to start pre-conditioning. Each
+  // schedule has exactly three slots. The Worker refuses a write until it has
+  // read the actual slots, so a dashboard save cannot invent a temperature or
+  // toggle an option the vehicle did not report.
+  var climateSchedulePanel = document.getElementById("climate-schedule-panel");
+  var climateScheduleStatusEl = document.getElementById("climate-schedule-status");
+  var climateScheduleTimersEl = document.getElementById("climate-schedule-timers");
+  var climateScheduleSaveBtn = document.getElementById("climate-schedule-save");
+  var climateTimerCards = [];
+  var climateScheduleLoaded = false;
+
+  function makeClimateTimerCards() {
+    if (!climateScheduleTimersEl || climateTimerCards.length) return;
+    var labels = ["M", "T", "W", "T", "F", "S", "S"];
+    for (var i = 0; i < 3; i++) {
+      var card = document.createElement("div");
+      card.className = "climate-timer";
+      card.dataset.timer = String(i);
+      var dayButtons = "";
+      for (var d = 0; d < CHARGE_DAY_ORDER.length; d++) {
+        dayButtons += '<button type="button" class="climate-day-btn" data-day="' + CHARGE_DAY_ORDER[d] + '">' + labels[d] + "</button>";
+      }
+      card.innerHTML =
+        '<div class="climate-timer-head"><label class="climate-enable">' +
+          '<input type="checkbox" class="climate-timer-enable" />' +
+          "<span>Timer " + (i + 1) + "</span>" +
+        "</label></div>" +
+        '<div class="climate-time-row"><label>Ready by ' +
+          '<input type="time" class="climate-timer-departure" value="08:00" />' +
+        "</label></div>" +
+        '<div class="climate-days" role="group" aria-label="Timer ' + (i + 1) + ' days">' + dayButtons + "</div>";
+      climateScheduleTimersEl.appendChild(card);
+      climateTimerCards.push(card);
+    }
+  }
+
+  function populateClimateTimerCard(card, timer) {
+    timer = timer || { id: null, enabled: false, departureMinutes: 480, days: [] };
+    card.dataset.conditioningId = timer.id || "";
+    var enable = card.querySelector(".climate-timer-enable");
+    if (enable) enable.checked = !!timer.enabled;
+    var departure = card.querySelector(".climate-timer-departure");
+    if (departure) departure.value = minutesToTimeStr(timer.departureMinutes || 0);
+    var days = timer.days || [];
+    Array.prototype.forEach.call(card.querySelectorAll(".climate-day-btn"), function (btn) {
+      btn.classList.toggle("active", days.indexOf(btn.dataset.day) !== -1);
+    });
+  }
+
+  function readClimateTimerCard(card) {
+    var enable = card.querySelector(".climate-timer-enable");
+    var departure = card.querySelector(".climate-timer-departure");
+    var days = [];
+    Array.prototype.forEach.call(card.querySelectorAll(".climate-day-btn.active"), function (btn) {
+      days.push(btn.dataset.day);
+    });
+    return {
+      id: card.dataset.conditioningId || null,
+      enabled: !!(enable && enable.checked),
+      departureMinutes: timeStrToMinutes(departure && departure.value),
+      days: days
+    };
+  }
+
+  async function loadClimateSchedule() {
+    if (!climateSchedulePanel) return;
+    makeClimateTimerCards();
+    climateScheduleLoaded = false;
+    if (climateScheduleSaveBtn) climateScheduleSaveBtn.disabled = true;
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) {
+      if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Unlock to load the vehicle schedule.";
+      return;
+    }
+    if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Loading vehicle schedule…";
+    try {
+      var res = await fetch(CONFIG.WORKER_URL + "/settings?operation=climateControl", {
+        headers: { "X-Dashboard-Key": key }
+      });
+      var body = null;
+      try { body = await res.json(); } catch (e) { /* handled below */ }
+      var schedule = (body && body.schedule) || [];
+      if (!res.ok || !body || !body.success) {
+        if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Climate scheduling is not available from this vehicle response.";
+        return;
+      }
+      if (schedule.length < climateTimerCards.length) {
+        if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Vehicle did not return all climate timers. Open Climate Schedule once in the Mitsubishi app, then reload.";
+        return;
+      }
+      for (var i = 0; i < climateTimerCards.length; i++) populateClimateTimerCard(climateTimerCards[i], schedule[i]);
+      climateScheduleLoaded = true;
+      if (climateScheduleSaveBtn) climateScheduleSaveBtn.disabled = false;
+      if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Loaded from vehicle. Cabin target and climate options will be preserved.";
+    } catch (e) {
+      if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Could not load the climate schedule.";
+    }
+  }
+
+  async function saveClimateSchedule() {
+    if (!climateScheduleSaveBtn || climateScheduleSaveBtn.disabled || !climateScheduleLoaded) return;
+    var timers = [];
+    for (var i = 0; i < climateTimerCards.length; i++) timers.push(readClimateTimerCard(climateTimerCards[i]));
+    climateScheduleSaveBtn.disabled = true;
+    climateScheduleSaveBtn.classList.add("sending");
+    if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Saving to vehicle…";
+    try {
+      var result = await postCommandBody({ action: "climate_schedule", timers: timers });
+      reportCommand("climate_schedule", result);
+      var body = result && result.body;
+      if (result && result.ok && body && body.success) {
+        var echoed = body.timers || [];
+        for (var j = 0; j < climateTimerCards.length; j++) populateClimateTimerCard(climateTimerCards[j], echoed[j]);
+        if (climateScheduleStatusEl) {
+          climateScheduleStatusEl.textContent = body.outcome === "succeeded"
+            ? "Saved and confirmed by vehicle."
+            : "Schedule submitted. The vehicle did not report a final outcome yet.";
+        }
+      } else if (climateScheduleStatusEl) {
+        climateScheduleStatusEl.textContent = "Save failed — see the message above.";
+      }
+    } catch (e) {
+      toast("Network error: " + e.message, "error");
+      if (climateScheduleStatusEl) climateScheduleStatusEl.textContent = "Save failed.";
+    } finally {
+      climateScheduleSaveBtn.classList.remove("sending");
+      climateScheduleSaveBtn.disabled = !climateScheduleLoaded;
+    }
+  }
+
+  if (climateSchedulePanel) {
+    climateSchedulePanel.addEventListener("click", function (e) {
+      var day = e.target.closest(".climate-day-btn");
+      if (day) { day.classList.toggle("active"); return; }
+      var save = e.target.closest("#climate-schedule-save");
+      if (save) { saveClimateSchedule(); }
     });
   }
 

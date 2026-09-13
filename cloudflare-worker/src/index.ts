@@ -695,12 +695,12 @@ async function performOperation(
  * despite first appearances. x() only treats it as success when y() or z12
  * holds, and both are narrow: y() is true only for a "customize" preset-profile
  * DELETE action, and z12 requires (operation == chargingControl2 ||
- * operation == climateControl) AND reasonCode == "2002" exactly. None of the
- * operations this worker sends (lock, unlock, horn, lights, locate, remoteAC,
- * engineOff, chargingControl, chargingControlStop) ever satisfy either gate, so
- * for every operation we use, the real app treats MessageDelivered as "still in
- * flight" and keeps polling — confirmed live 2026-07-28, where a remoteAC sat at
- * MessageDelivered (reasonCode 915) for 55s and then resolved to
+ * operation == climateControl) AND reasonCode == "2002" exactly. The two
+ * scheduler writes sent by this Worker carry their operation name into
+ * pollEvent() so that narrow acknowledgement is recognised; every other
+ * operation keeps treating MessageDelivered as "still in flight". This was
+ * confirmed live 2026-07-28, where a remoteAC sat at MessageDelivered
+ * (reasonCode 915) for 55s and then resolved to
  * {"status":"Failed","errorLabel":"TimeframePassed"}. Classifying it as success
  * here would have made the dashboard claim a command had landed when the car
  * never applied it, which is worse than reporting a timeout.
@@ -735,6 +735,7 @@ async function pollEvent(
   vin: string,
   eventId: string,
   timeoutMs: number = POLL_TIMEOUT_MS,
+  operation?: string,
 ): Promise<EventOutcome> {
   const url = BASE_URL + EP_RO_STATUS.replace("{vin}", encodeURIComponent(vin)).replace("{eventId}", encodeURIComponent(eventId));
   const headers = sharedHeaders(`Bearer ${accessToken}`);
@@ -762,6 +763,17 @@ async function pollEvent(
 
     const s = data.status.toLowerCase();
     if (s === "successful" || s === "success" || s === "inqueue") {
+      return { ...last, outcome: "succeeded" };
+    }
+    // The Mitsubishi app treats MessageDelivered + 2002 as a terminal
+    // acknowledgement for scheduler writes only. It keeps waiting for the
+    // normal remote commands, where MessageDelivered merely means the vehicle
+    // has not finished applying the request yet.
+    if (
+      s === "messagedelivered" &&
+      (operation === "chargingControl2" || operation === "climateControl") &&
+      last.reasonCode === "2002"
+    ) {
       return { ...last, outcome: "succeeded" };
     }
     if (s === "failed" || s === "failure") {
@@ -822,7 +834,7 @@ async function runCommand(
   if (typeof eventId !== "string" || !eventId) {
     return { eventId: null, submitted, event: null };
   }
-  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
+  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId, POLL_TIMEOUT_MS, operation) };
 }
 
 /**
@@ -1072,6 +1084,138 @@ function parseChargingSchedule(raw: JsonValue): ChargeTimerSummary[] {
     });
   }
   return out;
+}
+
+/**
+ * Recurring climate pre-conditioning schedule — operation "climateControl"
+ * (= RemoteClimateControlScheduler). The APK routes this through the same
+ * PerformRO endpoint as chargingControl2, using the top-level `data` key.
+ *
+ * The scheduler is vehicle-side: it is not a browser alarm and it continues
+ * to run after the dashboard and phone close. Mitsubishi models it as exactly
+ * three timer slots, each with a ready-by/departure time (endTimeOfDay), not a
+ * start/end window. `startTimeOfDay` is deliberately null in the app's own
+ * DGE mapper.
+ *
+ * A schedule also carries frontTemperature and optional hvacSettings. Those
+ * values can vary by model and equipment, so this Worker reads the current
+ * vehicle definitions first and preserves them byte-for-byte. We only edit
+ * enablement, days, and ready-by time. If Mitsubishi does not return all three
+ * slots, nothing is sent rather than inventing a temperature or an unsupported
+ * HVAC option.
+ */
+const CLIMATE_MAX_TIMERS = 3;
+
+export interface ClimateTimerInput {
+  id: string | null; // echoed for UI state; server-side definitions remain authoritative
+  enabled: boolean;
+  departureMinutes: number; // ready-by time, minutes since local midnight
+  days: string[]; // subset of CHARGING_DAY_ORDER
+}
+
+export interface ClimateTimerSummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+  departureMinutes: number;
+  days: string[];
+}
+
+function climateScheduleDefinitions(raw: JsonValue): Array<Record<string, JsonValue>> {
+  const list = findKey(raw, "conditioningDefinition");
+  if (!Array.isArray(list)) return [];
+  return list.filter((entry): entry is Record<string, JsonValue> =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry),
+  );
+}
+
+function parseClimateSchedule(raw: JsonValue): ClimateTimerSummary[] {
+  const out: ClimateTimerSummary[] = [];
+  for (const entry of climateScheduleDefinitions(raw)) {
+    const schedule = entry.schedule;
+    const sch = schedule !== null && typeof schedule === "object" && !Array.isArray(schedule) ? schedule : {};
+    const days = CHARGING_DAY_ORDER.filter((d) => toInt(sch[CHARGING_DAY_FIELDS[d]]) === 1);
+    const departureSeconds = toInt(sch.endTimeOfDay, 0) ?? 0;
+    out.push({
+      id: String(scalar(entry.conditioningId) ?? ""),
+      name: String(scalar(entry.conditioningName) ?? ""),
+      enabled: toInt(entry.conditioningStatus, 0) === 1,
+      departureMinutes: Math.round(departureSeconds / 60),
+      days,
+    });
+  }
+  return out;
+}
+
+function buildClimateScheduleExtra(
+  timers: ClimateTimerInput[],
+  existingDefinitions: Array<Record<string, JsonValue>>,
+): Record<string, unknown> {
+  if (existingDefinitions.length < CLIMATE_MAX_TIMERS) {
+    throw new ApiError(
+      409,
+      "Vehicle did not return all three climate schedule slots. Open Climate Schedule once in My Mitsubishi Connect, then try again; no change was sent.",
+    );
+  }
+
+  const conditioningDefinition: Record<string, unknown>[] = [];
+  for (let i = 0; i < CLIMATE_MAX_TIMERS; i++) {
+    const timer = timers[i];
+    const current = existingDefinitions[i];
+    const currentSchedule = current.schedule;
+    const preservedSchedule = currentSchedule !== null && typeof currentSchedule === "object" && !Array.isArray(currentSchedule)
+      ? currentSchedule
+      : {};
+    const dayFlags: Record<string, number> = {};
+    for (const day of CHARGING_DAY_ORDER) dayFlags[CHARGING_DAY_FIELDS[day]] = 0;
+    for (const day of timer.days) {
+      if (Object.prototype.hasOwnProperty.call(CHARGING_DAY_FIELDS, day)) {
+        dayFlags[CHARGING_DAY_FIELDS[day as (typeof CHARGING_DAY_ORDER)[number]]] = 1;
+      }
+    }
+
+    const rawId = scalar(current.conditioningId);
+    const id = typeof rawId === "string" && rawId ? rawId : randomHexId();
+    const rawName = scalar(current.conditioningName);
+    const name = typeof rawName === "string" && rawName ? rawName : `Timer ${i + 1}`;
+    const definition: Record<string, unknown> = {
+      conditioningStatus: timer.enabled ? 1 : 0,
+      conditioningAction: rawId ? 1 : 0,
+      conditioningId: id,
+      conditioningName: name,
+      schedule: {
+        ...preservedSchedule,
+        serviceScheduleType: 2,
+        startTimeOfDay: null,
+        endTimeOfDay: clampMinutesOfDay(timer.departureMinutes) * 60,
+        ...dayFlags,
+      },
+    };
+
+    // The app includes these only when the vehicle reports them. Keep their
+    // exact existing representation instead of fabricating null/off values.
+    if (Object.prototype.hasOwnProperty.call(current, "frontTemperature")) {
+      definition.frontTemperature = current.frontTemperature;
+    }
+    if (Object.prototype.hasOwnProperty.call(current, "hvacSettings")) {
+      definition.hvacSettings = current.hvacSettings;
+    }
+    conditioningDefinition.push(definition);
+  }
+  return { data: { eventTimestamp: isoEventTimestamp(), conditioningDefinition } };
+}
+
+async function fetchClimateScheduleSettings(accessToken: string, vin: string): Promise<JsonValue> {
+  const res = await fetch(
+    `${BASE_URL}${EP_PARENTAL_ALERT.replace("{vin}", encodeURIComponent(vin))}?operation=climateControl`,
+    { headers: sharedHeaders(`Bearer ${accessToken}`) },
+  );
+  if (!res.ok) {
+    throw new ApiError(502, `Climate schedule read failed: HTTP ${res.status} ${await safeText(res)}`);
+  }
+  const raw = (await res.json().catch(() => null)) as JsonValue;
+  if (raw === null) throw new ApiError(502, "Climate schedule read returned no JSON");
+  return raw;
 }
 
 /**
@@ -1565,8 +1709,12 @@ export default {
         }
         const settings = (await res.json()) as JsonValue;
         // Normalised alongside the raw payload so the frontend doesn't have to
-        // duplicate the chargingDefinition parsing logic in browser JS.
-        const schedule = operation === "chargingControl2" ? parseChargingSchedule(settings) : undefined;
+        // duplicate Mitsubishi's timer schemas in browser JS.
+        const schedule = operation === "chargingControl2"
+          ? parseChargingSchedule(settings)
+          : operation === "climateControl"
+            ? parseClimateSchedule(settings)
+            : undefined;
         return json({ success: true, operation, settings, schedule });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
@@ -1746,6 +1894,75 @@ export default {
             : event.outcome === "failed"
               ? `Charging schedule rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
               : "Charging schedule sent, but the vehicle did not report back in time.";
+        return json({
+          success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event,
+          timers: sentTimers,
+        });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
+      }
+    }
+
+    // --- Recurring climate schedule. The APK calls this
+    // RemoteClimateControlScheduler / operation:"climateControl" and places
+    // `conditioningDefinition` under `data`, exactly like the charging
+    // scheduler's envelope. Unlike an immediate climate start, this is a
+    // vehicle-side timer configuration: we preserve the target temperature and
+    // supported HVAC choices reported by the vehicle, then update only the
+    // timer's enabled state, weekly days, and ready-by time.
+    if (action === "climate_schedule") {
+      const items = Array.isArray(rawTimers) ? rawTimers : [];
+      if (items.length !== CLIMATE_MAX_TIMERS) {
+        return json({ success: false, error: `Exactly ${CLIMATE_MAX_TIMERS} climate timers are required` }, 400);
+      }
+      const timers: ClimateTimerInput[] = [];
+      for (const raw of items) {
+        if (raw === null || typeof raw !== "object") {
+          return json({ success: false, error: "Each climate timer must be an object" }, 400);
+        }
+        const item = raw as Record<string, unknown>;
+        const departureMinutes = typeof item.departureMinutes === "number" ? item.departureMinutes : NaN;
+        if (!Number.isFinite(departureMinutes)) {
+          return json({ success: false, error: "Each climate timer needs numeric departureMinutes" }, 400);
+        }
+        const days = Array.isArray(item.days) ? item.days.filter((d): d is string => typeof d === "string") : [];
+        const unknownDay = days.find((d) => !CHARGING_DAY_ORDER.includes(d as (typeof CHARGING_DAY_ORDER)[number]));
+        if (unknownDay) {
+          return json({ success: false, error: `Unknown day '${unknownDay}'` }, 400);
+        }
+        timers.push({
+          id: typeof item.id === "string" && item.id ? item.id : null,
+          enabled: item.enabled === true,
+          departureMinutes: clampMinutesOfDay(departureMinutes),
+          days,
+        });
+      }
+
+      try {
+        const { accessToken } = await login(env);
+        const vin = await getVin(env, accessToken);
+        // Authoritative source for ids, saved temperature, and option fields.
+        // This also prevents a stale browser tab from accidentally deleting a
+        // setting that was changed in Mitsubishi's own app.
+        const currentSchedule = await fetchClimateScheduleSettings(accessToken, vin);
+        const extra = buildClimateScheduleExtra(timers, climateScheduleDefinitions(currentSchedule));
+        const sentTimers = parseClimateSchedule(extra as JsonValue);
+        await wakeUpVehicle(accessToken, vin);
+        const submitted = await performOperation(env, accessToken, vin, null, "climateControl", extra);
+        const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
+        const event = typeof eventId === "string" && eventId
+          ? await pollEvent(accessToken, vin, eventId, POLL_TIMEOUT_MS, "climateControl")
+          : null;
+        if (!event) {
+          return json({ success: true, action, message: "Climate schedule submitted.", eventId: eventId ?? null, raw: submitted, timers: sentTimers });
+        }
+        const message =
+          event.outcome === "succeeded"
+            ? "Climate schedule saved, confirmed by vehicle."
+            : event.outcome === "failed"
+              ? `Climate schedule rejected by vehicle${event.errorLabel ? ` (${event.errorLabel})` : ""}.`
+              : "Climate schedule sent, but the vehicle did not report back in time.";
         return json({
           success: event.outcome !== "failed", action, outcome: event.outcome, message, eventId, event,
           timers: sentTimers,

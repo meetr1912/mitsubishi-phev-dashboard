@@ -742,6 +742,26 @@
         <span>Save schedule</span>
       </button>
     </section>
+
+    <!-- Climate scheduling is a vehicle-side recurring pre-conditioning timer.
+         The app creates exactly three slots. The editor is built only after
+         the Worker reads those slots, so it can preserve each vehicle-reported
+         target temperature and HVAC setting rather than guessing fields. -->
+    <section class="panel" id="climate-schedule-panel" aria-describedby="climate-schedule-status climate-schedule-note">
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-fan" /></svg>
+        Climate schedule
+      </h2>
+      <p class="schedule-hint" id="climate-schedule-status">Unlock to load the vehicle schedule.</p>
+      <p class="schedule-guard" id="climate-schedule-note">
+        “Ready by” is a departure time. Saved cabin target and climate options stay unchanged. At run time, the vehicle must be parked, off, in Park, and closed/locked.
+      </p>
+      <div class="climate-schedule-timers" id="climate-schedule-timers"></div>
+      <button type="button" class="climate-master" id="climate-schedule-save" disabled>
+        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+        <span>Save climate schedule</span>
+      </button>
+    </section>
     </div>
 
     <!-- =============== HISTORY TAB =============== -->
