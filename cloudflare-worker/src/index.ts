@@ -145,14 +145,14 @@ const OPERATION_DATA: Record<string, Record<string, unknown>> = {
  * dashboard therefore collects the toggles locally and submits them together
  * as a single climate start.
  */
-const HVAC_OPTIONS: Record<string, { field: string; onValue: string }> = {
-  seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON" },
-  seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON" },
-  seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON" },
-  seat_rr: { field: "rearRightSeatControl", onValue: "HEATER_ON" },
-  steering_heat: { field: "steeringHeaterControl", onValue: "TURN_ON" },
-  defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON" },
-  defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON" },
+const HVAC_OPTIONS: Record<string, { field: string; onValue: string; offValue: string }> = {
+  seat_fl: { field: "frontLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_fr: { field: "frontRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_rl: { field: "rearLeftSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  seat_rr: { field: "rearRightSeatControl", onValue: "HEATER_ON", offValue: "HEATER_OFF" },
+  steering_heat: { field: "steeringHeaterControl", onValue: "TURN_ON", offValue: "TURN_OFF" },
+  defrost_front: { field: "frontDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
+  defrost_rear: { field: "rearDefrostMode", onValue: "TURN_ON", offValue: "TURN_OFF" },
 };
 
 /**
@@ -295,22 +295,44 @@ export interface ClimateRequest {
 }
 
 /**
+ * Read the currently supported controls before composing a climate request.
+ *
+ * The v2.90.10 app serializes ON or OFF for every *available* HVAC control,
+ * but omits unavailable ones. Sending OFF for every known control was rejected
+ * on this DGE, so capability detection is deliberately best-effort: when the
+ * settings read is unavailable or unrecognised we keep the old minimal payload.
+ */
+async function getAvailableHvacOptions(accessToken: string, vin: string): Promise<Set<string> | null> {
+  try {
+    const res = await fetch(
+      `${BASE_URL}${EP_PARENTAL_ALERT.replace("{vin}", encodeURIComponent(vin))}?operation=remoteAC`,
+      { headers: sharedHeaders(`Bearer ${accessToken}`) },
+    );
+    if (!res.ok) return null;
+    const raw = (await res.json().catch(() => null)) as JsonValue;
+    if (raw === null) return null;
+    const available = new Set<string>();
+    for (const [name, cfg] of Object.entries(HVAC_OPTIONS)) {
+      if (findKey(raw, cfg.field) !== undefined) available.add(name);
+    }
+    return available.size ? available : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the "dt" payload for a climate start, matching the app's builder.
  *
- * Unselected options are OMITTED from hvacSettings entirely, not written to
- * their offValue. This used to write every option explicitly (on the theory
- * that it would keep cabin state from leaking forward between presses), but
- * confirmed live 2026-07-29: a bare climate start with every HVAC_OPTIONS
- * field forced to its offValue got the whole request rejected — HTTP 400
- * {"errorLabel":"InvalidParameterValue","errorDescription":"Invalid value for
- * dt parameter in request"}. mitsubishi_na/api.py's async_climate_start(),
- * confirmed working end-to-end, only ever sets a field when the caller passes
- * a non-None value for it and leaves everything else out of the dict, which
- * is what this now matches. The vehicle evidently treats an omitted field as
- * "off" on its own — the earlier "leftover state" concern was never observed
- * and cost a hard rejection instead.
+ * On the verified v2.90.10 client, every available control is explicitly sent
+ * as ON or OFF. We mirror that only after discovering availability from the
+ * vehicle's remoteAC settings; unknown capability shapes retain the proven
+ * minimal payload rather than guessing fields the model might reject.
  */
-function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
+function buildHvacExtra(
+  req: ClimateRequest,
+  availableOptions: ReadonlySet<string> | null = null,
+): Record<string, unknown> {
   const selected = new Set(req.options);
   const hvacSettings: Record<string, unknown> = {
     fanMode: FAN_MODE_NORMAL,
@@ -319,7 +341,9 @@ function buildHvacExtra(req: ClimateRequest): Record<string, unknown> {
     checkNumber: 75,
   };
   for (const [name, cfg] of Object.entries(HVAC_OPTIONS)) {
-    if (selected.has(name)) {
+    if (availableOptions?.has(name)) {
+      hvacSettings[cfg.field] = selected.has(name) ? cfg.onValue : cfg.offValue;
+    } else if (selected.has(name)) {
       hvacSettings[cfg.field] = cfg.onValue;
     }
   }
@@ -793,10 +817,11 @@ async function runCommand(
  */
 async function runClimateStart(
   env: Env,
-  extra?: Record<string, unknown>,
+  request: ClimateRequest,
 ): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
   const { accessToken } = await login(env);
   const vin = await getVin(env, accessToken);
+  const extra = buildHvacExtra(request, await getAvailableHvacOptions(accessToken, vin));
   await wakeUpVehicle(accessToken, vin);
 
   try {
@@ -1707,6 +1732,7 @@ export default {
     const minutes = Math.max(1, Math.min(MAX_HVAC_MINUTES, Math.round(requestedMinutes)));
 
     let extra: Record<string, unknown> | undefined;
+    let climateRequest: ClimateRequest | undefined;
     let optionCount = 0;
     if (isHvac) {
       const options = Array.isArray(rawOptions) ? rawOptions.filter((o): o is string => typeof o === "string") : [];
@@ -1736,12 +1762,12 @@ export default {
       } catch {
         posmap = null;
       }
-      extra = buildHvacExtra({ minutes, temperatureC, options, posmap });
+      climateRequest = { minutes, temperatureC, options, posmap };
     }
 
     try {
       const { eventId, submitted, event } = isHvac
-        ? await runClimateStart(env, extra)
+        ? await runClimateStart(env, climateRequest!)
         : await runCommand(env, operation, extra);
 
       // No eventId means the backend answered synchronously (some operations do)
