@@ -73,17 +73,10 @@
     setText("#veh-model", modelBits || "—");
     setText("#veh-updated", "Updated " + fmtTs(l.ts || data.generated_at));
     setText("#veh-vin", data.vin ? "VIN " + data.vin : "—");
-    renderVehicleVisual(l);
+    renderHomeStatus(l);
 
     // tiles
     setField("battery", (l.battery_pct != null) ? l.battery_pct + "%" : "—");
-    var fill = document.getElementById("battery-fill");
-    if (fill && l.battery_pct != null) {
-      fill.style.width = Math.max(0, Math.min(100, l.battery_pct)) + "%";
-      fill.style.background = l.battery_pct <= 15
-        ? "var(--danger)"
-        : "linear-gradient(90deg, var(--accent-dim), var(--accent))";
-    }
     setField("ev_range", rangeStr(l.ev_range_km));
     setField("gas_range", rangeStr(l.gas_range_km));
     setField("total_range", rangeStr(l.total_range_km));
@@ -101,12 +94,11 @@
     });
     paintLights(l.headlights);
 
-    // tire pressure + active warnings + driving score
+    // Reported condition only.
     renderTires(l.tire_pressure_bar);
     renderWarnings(l.warnings);
     renderHealthSummary(l);
     renderLocation(l.location);
-    renderDrivingScore(l.driving_score);
 
     // First paint after unlock renders the cached snapshot; immediately pull one
     // live status so the very first view is current without a manual refresh.
@@ -127,7 +119,53 @@
     }
   }
 
-  // ---- vehicle-at-a-glance SVG ----
+  // The home screen uses a short, honest summary. It never infers a locked
+  // vehicle from incomplete door telemetry, and it keeps a confirmed climate
+  // session distinct from the next sensor report.
+  function renderHomeStatus(latest) {
+    latest = latest || {};
+    var state = document.getElementById("home-state");
+    var title = document.getElementById("home-title");
+    var detail = document.getElementById("home-detail");
+    if (!state || !title || !detail) return;
+
+    var classes = "status-pill";
+    var hasReport = Object.keys(latest).length > 0;
+    var doors = latest.doors && typeof latest.doors === "object" ? latest.doors : {};
+    var openAccess = ALL_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); });
+    var knownAccess = ALL_DOOR_KEYS.filter(function (key) { return isKnown(doors[key]); });
+    var charging = latest.charging_status === "charging";
+
+    if (!hasReport) {
+      state.textContent = "Waiting for report";
+      title.textContent = "Vehicle status unavailable";
+      detail.textContent = "Unlock the dashboard to see the most recent report.";
+    } else if (openAccess.length) {
+      state.textContent = "Check vehicle";
+      classes += " is-warning";
+      title.textContent = openAccess.length + " access point" + (openAccess.length === 1 ? " is" : "s are") + " open";
+      detail.textContent = "This is from the latest vehicle report.";
+    } else if (charging) {
+      state.textContent = "Charging";
+      classes += " is-active";
+      title.textContent = "Charging in progress";
+      detail.textContent = latest.plugged_in ? "The vehicle reports that it is plugged in." : "Charging was reported by the vehicle.";
+    } else if (vehicleClimate.running) {
+      state.textContent = "Climate running";
+      classes += " is-active";
+      title.textContent = "Climate was confirmed";
+      detail.textContent = "The timer shown in Climate is based on the confirmed request.";
+    } else {
+      state.textContent = "Report received";
+      classes += " is-ready";
+      title.textContent = knownAccess.length === ALL_DOOR_KEYS.length ? "All reported access points are closed" : "Vehicle report received";
+      detail.textContent = knownAccess.length === ALL_DOOR_KEYS.length ? "Refresh before relying on this status away from the vehicle." : "Some access sensors were not included in this report.";
+    }
+    state.className = classes;
+  }
+
+  // Legacy animation helpers remain inert while the new task-first interface
+  // is in place. Vehicle state is now summarized in renderHomeStatus().
   // This visualization only reflects fields from the last vehicle report. It
   // is intentionally separate from command outcome feedback: a remote command
   // can be confirmed by the operation endpoint before the next status report
@@ -234,6 +272,12 @@
     vehicleClimate.options = Array.isArray(options) ? options.slice() : [];
     var hero = document.getElementById("vehicle-hero");
     if (hero) hero.classList.toggle("is-climate-running", vehicleClimate.running);
+    var climateState = document.getElementById("climate-state");
+    if (climateState) {
+      climateState.className = "status-pill" + (vehicleClimate.running ? " is-active" : "");
+      climateState.textContent = vehicleClimate.running ? "Running" : "Off";
+    }
+    if (lastData && lastData.latest) renderHomeStatus(lastData.latest);
     setVehicleSignal(
       "vehicle-climate-signal",
       vehicleClimate.running ? "Running" : "Off",
@@ -475,14 +519,13 @@
     // Locate requires vehicle location services. When privacy mode is
     // explicitly reported on, keep the control visibly unavailable instead of
     // sending a command the vehicle will reject. Unknown remains available.
-    var locateBtn = document.querySelector('.cmd-btn[data-action="locate"]');
-    if (locateBtn) {
-      var locateBlocked = flags.privacyModeEnabled === true;
+    var locateBlocked = flags.privacyModeEnabled === true;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-remote-action="locate"]'), function (locateBtn) {
       locateBtn.disabled = locateBlocked;
       locateBtn.classList.toggle("not-available", locateBlocked);
       if (locateBlocked) locateBtn.setAttribute("title", "Unavailable while vehicle privacy mode is on");
       else locateBtn.removeAttribute("title");
-    }
+    });
   }
 
   function rangeStr(km) {
@@ -631,10 +674,86 @@
     }
   }
 
-  document.getElementById("commands").addEventListener("click", function (e) {
-    var btn = e.target.closest(".cmd-btn");
+  // Remote controls are always deliberate. A tap describes the operation;
+  // only the second, explicit confirmation sends it to the Worker.
+  var commandConfirmModal = document.getElementById("command-confirm-modal");
+  var commandConfirmKind = document.getElementById("command-confirm-kind");
+  var commandConfirmTitle = document.getElementById("command-confirm-title");
+  var commandConfirmCopy = document.getElementById("command-confirm-copy");
+  var commandConfirmBtn = document.getElementById("command-confirm");
+  var commandConfirmCancelBtn = document.getElementById("command-confirm-cancel");
+  var pendingConfirmation = null;
+  var REMOTE_ACTION_COPY = {
+    lock: { kind: "Vehicle security", title: "Lock vehicle?", copy: "This asks the vehicle to lock its doors.", confirm: "Lock vehicle" },
+    unlock: { kind: "Vehicle security", title: "Unlock vehicle?", copy: "This can make the vehicle accessible to anyone nearby.", confirm: "Unlock vehicle", destructive: true },
+    locate: { kind: "Vehicle location", title: "Find vehicle?", copy: "This asks the vehicle to signal its location. It is unavailable while privacy mode is on.", confirm: "Find vehicle" },
+    lights: { kind: "Vehicle signal", title: "Flash lights?", copy: "This can be visible and distracting to people near the vehicle.", confirm: "Flash lights" },
+    horn: { kind: "Vehicle signal", title: "Sound horn?", copy: "This can be loud for people near the vehicle.", confirm: "Sound horn", destructive: true },
+    charge_start: { kind: "Charging", title: "Start charging?", copy: "The vehicle will attempt to begin charging if it is connected and ready.", confirm: "Start charging" },
+    charge_stop: { kind: "Charging", title: "Stop charging?", copy: "This stops an active vehicle charge session.", confirm: "Stop charging", destructive: true }
+  };
+
+  function closeConfirmation() {
+    if (!commandConfirmModal) return;
+    var trigger = pendingConfirmation && pendingConfirmation.trigger;
+    pendingConfirmation = null;
+    commandConfirmModal.classList.remove("open");
+    commandConfirmModal.setAttribute("aria-hidden", "true");
+    if (trigger && typeof trigger.focus === "function") trigger.focus();
+  }
+
+  function requestConfirmation(config) {
+    if (!config || typeof config.execute !== "function") return;
+    if (!commandConfirmModal || !commandConfirmBtn || !commandConfirmTitle || !commandConfirmCopy || !commandConfirmKind) {
+      config.execute();
+      return;
+    }
+    pendingConfirmation = config;
+    commandConfirmKind.textContent = config.kind || "Remote action";
+    commandConfirmTitle.textContent = config.title || "Confirm action";
+    commandConfirmCopy.textContent = config.copy || "This will send a request to the vehicle.";
+    commandConfirmBtn.textContent = config.confirm || "Continue";
+    commandConfirmBtn.classList.toggle("is-destructive", !!config.destructive);
+    commandConfirmModal.classList.add("open");
+    commandConfirmModal.setAttribute("aria-hidden", "false");
+    commandConfirmBtn.focus();
+  }
+
+  function requestRemoteCommand(action, btn) {
+    var copy = REMOTE_ACTION_COPY[action];
+    if (!copy) return;
+    requestConfirmation({
+      kind: copy.kind,
+      title: copy.title,
+      copy: copy.copy,
+      confirm: copy.confirm,
+      destructive: copy.destructive,
+      trigger: btn,
+      execute: function () { sendCommand(action, btn); }
+    });
+  }
+
+  if (commandConfirmCancelBtn) commandConfirmCancelBtn.addEventListener("click", closeConfirmation);
+  if (commandConfirmBtn) {
+    commandConfirmBtn.addEventListener("click", function () {
+      var pending = pendingConfirmation;
+      if (!pending) return;
+      closeConfirmation();
+      pending.execute();
+    });
+  }
+  if (commandConfirmModal) {
+    commandConfirmModal.addEventListener("click", function (e) {
+      if (e.target === commandConfirmModal) closeConfirmation();
+    });
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && pendingConfirmation) closeConfirmation();
+  });
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest("[data-remote-action]");
     if (!btn || btn.disabled) return;
-    if (btn.dataset.action) sendCommand(btn.dataset.action, btn);
+    requestRemoteCommand(btn.dataset.remoteAction, btn);
   });
 
   // ---- climate & comfort ----
@@ -757,7 +876,7 @@
       serviceDiscoveryChipsEl.textContent = "";
       serviceDiscoveryEl.hidden = services.length === 0;
       if (services.length) {
-        serviceDiscoverySummaryEl.textContent = "API-reported services (" + services.length + ")";
+        serviceDiscoverySummaryEl.textContent = "Vehicle-reported services (" + services.length + ")";
         services.forEach(function (service) {
           addSupportChip(serviceDiscoveryChipsEl, titleize(service), "service");
         });
@@ -869,6 +988,18 @@
       climateStopBtn.classList.remove("sending");
       climateStopBtn.disabled = false;
     }
+  }
+
+  function requestClimateStop() {
+    requestConfirmation({
+      kind: "Climate",
+      title: "Stop climate?",
+      copy: "This ends the current remote climate session.",
+      confirm: "Stop climate",
+      destructive: true,
+      trigger: climateStopBtn,
+      execute: stopClimate
+    });
   }
 
   var CLIMATE_PRESETS = {
@@ -1005,7 +1136,7 @@
       var start = e.target.closest(".climate-master");
       if (start) { startClimate(); return; }
       var stop = e.target.closest(".climate-stop");
-      if (stop) { stopClimate(); return; }
+      if (stop) { requestClimateStop(); return; }
     });
   }
   renderTemp();

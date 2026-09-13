@@ -3,234 +3,117 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#090a0d" />
+  <meta name="theme-color" content="#f5f5f7" />
   <title>Outlander PHEV</title>
-
-  <!-- Add to Home Screen -> standalone app (no Safari chrome), proper icon +
-       title, instead of a plain bookmark. iOS reads the apple-* tags directly;
-       the manifest covers Android/desktop install prompts. -->
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Outlander" />
-
   <link rel="stylesheet" href="styles.css" />
 
-  <!-- Tiny pub/sub bootstrap so crypto.js can hand the decrypted data to every
-       other module regardless of load order. Consumers call PHEV.onData(cb);
-       crypto.js calls PHEV.setData(obj) once decryption succeeds. -->
   <script>
     window.PHEV = window.PHEV || {};
     window.PHEV._listeners = [];
     window.PHEV.data = null;
-    window.PHEV.onData = function (cb) {
-      if (window.PHEV.data) { try { cb(window.PHEV.data); } catch (e) { console.error(e); } }
-      window.PHEV._listeners.push(cb);
+    window.PHEV.onData = function (callback) {
+      if (window.PHEV.data) { try { callback(window.PHEV.data); } catch (error) { console.error(error); } }
+      window.PHEV._listeners.push(callback);
     };
-    window.PHEV.setData = function (d) {
-      window.PHEV.data = d;
-      window.PHEV._listeners.forEach(function (cb) {
-        try { cb(d); } catch (e) { console.error(e); }
+    window.PHEV.setData = function (data) {
+      window.PHEV.data = data;
+      window.PHEV._listeners.forEach(function (callback) {
+        try { callback(data); } catch (error) { console.error(error); }
       });
     };
   </script>
-
-  <!-- Caches the static shell only (never live vehicle data or any Worker
-       call) so reopening the installed app paints instantly, even offline
-       or on a slow connection. See sw.js for exactly what's covered. -->
   <script>
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("./sw.js").catch(function () { /* best-effort */ });
+        navigator.serviceWorker.register("./sw.js").catch(function () { /* best effort */ });
       });
     }
   </script>
 </head>
 <body>
-  <!-- Standalone (installed) PWAs don't get Safari's own pull-to-refresh --
-       this fills that gap. Hidden above the viewport until dragged down;
-       see pull-refresh.js. -->
   <div id="pull-indicator" class="pull-indicator" aria-hidden="true">
     <svg aria-hidden="true"><use href="#icon-refresh" /></svg>
   </div>
 
-  <!-- ============================= ICON SPRITE =============================
-       Original line-icon set drawn for this dashboard. Uniform 24x24 grid,
-       1.6 stroke, round caps — deliberately consistent so heat controls and
-       status controls read as one family. -->
   <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
     <defs>
-      <g id="i-base" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></g>
-
-      <symbol id="icon-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-bolt" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
       </symbol>
-
-      <symbol id="icon-faceid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 8V6a2 2 0 0 1 2-2h2" />
-        <path d="M16 4h2a2 2 0 0 1 2 2v2" />
-        <path d="M20 16v2a2 2 0 0 1-2 2h-2" />
-        <path d="M8 20H6a2 2 0 0 1-2-2v-2" />
-        <circle cx="9" cy="10" r="0.9" fill="currentColor" stroke="none" />
-        <circle cx="15" cy="10" r="0.9" fill="currentColor" stroke="none" />
+      <symbol id="icon-faceid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2" />
+        <circle cx="9" cy="10" r=".9" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="10" r=".9" fill="currentColor" stroke="none" />
         <path d="M9 15c1 1 5 1 6 0" />
       </symbol>
-
-      <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M20 11a8 8 0 1 0-.7 4.3" />
-        <path d="M20 5v6h-6" />
+      <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 11a8 8 0 1 0-.7 4.3M20 5v6h-6" />
       </symbol>
-
-      <symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3.2" />
         <path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" />
       </symbol>
-
-      <symbol id="icon-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3v9" />
-        <path d="M6.8 6.8a7.5 7.5 0 1 0 10.4 0" />
+      <symbol id="icon-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v9M6.8 6.8a7.5 7.5 0 1 0 10.4 0" />
       </symbol>
-
-      <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m3.5 10 8.5-6.5L20.5 10v9.5a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z" />
+        <path d="M9.5 20.5v-6h5v6" />
+      </symbol>
+      <symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <rect x="4.5" y="10.5" width="15" height="10" rx="2.2" />
-        <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
-        <circle cx="12" cy="15.5" r="1.2" />
+        <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3M12 14.5v2.2" />
       </symbol>
-
-      <symbol id="icon-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <rect x="4.5" y="10.5" width="15" height="10" rx="2.2" />
-        <path d="M8 10.5V7.5a4 4 0 0 1 7.7-1.5" />
-        <circle cx="12" cy="15.5" r="1.2" />
+        <path d="M8 10.5V7.5a4 4 0 0 1 7.7-1.5M12 14.5v2.2" />
       </symbol>
-
-      <symbol id="icon-horn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 9.5v5h3.5L12 19V5L6.5 9.5H3z" />
-        <path d="M15.5 9a4 4 0 0 1 0 6" />
-        <path d="M18.3 6.4a8 8 0 0 1 0 11.2" />
-      </symbol>
-
-      <symbol id="icon-lights" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3.5 7.5h3.2a6 6 0 0 1 0 9H3.5z" />
-        <path d="M12.5 6.5h5M12.5 12h6.5M12.5 17.5h5" />
-      </symbol>
-
-      <symbol id="icon-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 21s6.5-6 6.5-10.5a6.5 6.5 0 1 0-13 0C5.5 15 12 21 12 21z" />
         <circle cx="12" cy="10.5" r="2.3" />
       </symbol>
-
-      <!-- Seat heater, side profile: backrest + cushion + a rising heat wave.
-           Uses the warm comfort colour only when that zone is on. -->
-      <symbol id="icon-seat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M8.4 3.5h3.3a2.2 2.2 0 0 1 2.2 2.2v8.8H8.4a2.2 2.2 0 0 1-2.2-2.2V5.7a2.2 2.2 0 0 1 2.2-2.2z" />
-        <path d="M5.4 16.4h9.9a2.3 2.3 0 0 1 2.3 2.3v1.8" />
-        <path d="M19.7 4.3c-1 .9-1 2 0 2.9s1 2 0 2.9" />
-      </symbol>
-
-      <symbol id="icon-steering" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="8.5" />
-        <circle cx="12" cy="12" r="2.6" />
-        <path d="M12 3.5v5.9M4.2 14.3l5.3-1.6M19.8 14.3l-5.3-1.6" />
-      </symbol>
-
-      <!-- Front defrost: windscreen arc with three rising heat waves. -->
-      <symbol id="icon-defrost-front" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3.5 19.5c0-4 1.4-7.5 3.2-9.2h10.6c1.8 1.7 3.2 5.2 3.2 9.2" />
-        <path d="M8 8c.9-.8.9-1.9 0-2.7S7.1 3.4 8 2.6" />
-        <path d="M12 8c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
-        <path d="M16 8c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
-      </symbol>
-
-      <!-- Rear defrost: same shell, plus the grid lines of the heated element. -->
-      <symbol id="icon-defrost-rear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3.5 19.5c0-4 1.4-7.5 3.2-9.2h10.6c1.8 1.7 3.2 5.2 3.2 9.2" />
-        <path d="M6.2 14h11.6M5.4 17h13.2" />
-        <path d="M9.5 7.6c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
-        <path d="M14.5 7.6c.9-.8.9-1.9 0-2.7s-.9-1.9 0-2.7" />
-      </symbol>
-
-      <symbol id="icon-fan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-fan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="1.8" />
-        <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2z" />
-        <path d="M13.8 12c3 0 5.2.8 5.2 2.6 0 1.5-1.6 2.3-3 1.4-1.2-.8-2.2-2.3-2.2-4z" />
-        <path d="M10.2 12c0 3-.8 5.2-2.6 5.2-1.5 0-2.3-1.6-1.4-3 .8-1.2 2.3-2.2 4-2.2z" />
-        <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
+        <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2zM13.8 12c3 0 5.2.8 5.2 2.6 0 1.5-1.6 2.3-3 1.4-1.2-.8-2.2-2.3-2.2-4zM10.2 12c0 3-.8 5.2-2.6 5.2-1.5 0-2.3-1.6-1.4-3 .8-1.2 2.3-2.2 4-2.2zM10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
       </symbol>
-
-      <!-- Fan at full tilt, for max-defrost (the top-level "def" flag) — same
-           blades as icon-fan plus motion lines, so the two read as a matched
-           pair. -->
-      <symbol id="icon-fan-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="1.8" />
-        <path d="M12 10.2c0-3 .8-5.2 2.6-5.2 1.5 0 2.3 1.6 1.4 3-.8 1.2-2.3 2.2-4 2.2z" />
-        <path d="M13.8 12c3 0 5.2.8 5.2 2.6 0 1.5-1.6 2.3-3 1.4-1.2-.8-2.2-2.3-2.2-4z" />
-        <path d="M10.2 12c0 3-.8 5.2-2.6 5.2-1.5 0-2.3-1.6-1.4-3 .8-1.2 2.3-2.2 4-2.2z" />
-        <path d="M10.2 12c-3 0-5.2-.8-5.2-2.6C5 7.9 6.6 7.1 8 8c1.2.8 2.2 2.3 2.2 4z" />
-        <path d="M2.2 8.5h1.6M2 12h1.8M2.2 15.5h1.6" />
+      <symbol id="icon-bolt-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 4 14h6l-1 8 9-12h-6zM3.5 3.5l17 17" />
       </symbol>
-
-      <!-- Lightning bolt with a slash: stop charging. -->
-      <symbol id="icon-bolt-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
-        <path d="M3.5 3.5l17 17" />
-      </symbol>
-
-      <!-- Stop: filled square, for ending an in-progress climate session. -->
-      <symbol id="icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <rect x="5.5" y="5.5" width="13" height="13" rx="2.4" />
       </symbol>
-
-      <symbol id="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4.5 20.5V6.8L14 3.5v17z" />
-        <path d="M14 20.5h5.5V11L14 6.8" />
-        <circle cx="11" cy="12" r="1" />
+      <symbol id="icon-lights" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 7.5h3.2a6 6 0 0 1 0 9H3.5zM12.5 6.5h5M12.5 12h6.5M12.5 17.5h5" />
       </symbol>
-
-      <symbol id="icon-hood" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M2.5 15.5h19" />
-        <path d="M4 15.5c1-5 4.2-8 8-8s7 3 8 8" />
-        <path d="M12 7.5v-3" />
+      <symbol id="icon-horn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9.5v5h3.5L12 19V5L6.5 9.5H3zM15.5 9a4 4 0 0 1 0 6M18.3 6.4a8 8 0 0 1 0 11.2" />
       </symbol>
-
-      <symbol id="icon-trunk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3.5 18.5v-6l4-5h9l4 5v6" />
-        <path d="M3.5 12.5h17" />
-        <path d="M10 15.5h4" />
+      <symbol id="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 20.5V6.8L14 3.5v17zM14 20.5h5.5V11L14 6.8M11 12h.01" />
       </symbol>
-
-      <symbol id="icon-tire" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <symbol id="icon-hood" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2.5 15.5h19M4 15.5c1-5 4.2-8 8-8s7 3 8 8M12 7.5v-3" />
+      </symbol>
+      <symbol id="icon-trunk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3.5 18.5v-6l4-5h9l4 5v6M3.5 12.5h17M10 15.5h4" />
+      </symbol>
+      <symbol id="icon-tire" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <rect x="5.5" y="3" width="13" height="18" rx="5" />
         <path d="M9 7.5v9M12 6.5v11M15 7.5v9" />
-      </symbol>
-
-      <!-- Gauge / speedometer — Status tab. -->
-      <symbol id="icon-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3.5 17a8.5 8.5 0 0 1 17 0" />
-        <path d="M12 17l4.2-4.2" />
-        <circle cx="12" cy="17" r="1.1" />
-      </symbol>
-
-      <!-- Line chart — History tab. -->
-      <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 4v15a1 1 0 0 0 1 1h15" />
-        <path d="M7.5 14.5 11 10l3 2.4 4.5-5.4" />
       </symbol>
     </defs>
   </svg>
 
-  <!-- ============================= LOCK / PASSWORD GATE ============================= -->
   <div id="lock-overlay" class="lock-overlay" aria-hidden="false">
     <div class="lock-card">
       <svg class="lock-logo" aria-hidden="true"><use href="#icon-bolt" /></svg>
       <h1>Outlander PHEV</h1>
       <p id="lock-sub" class="lock-sub">Enter your dashboard passphrase</p>
-
-      <!-- Shown instead of the passphrase form when Face ID lock is turned on
-           in Settings. Local device check only -- there's no server to
-           verify against, so this is a fast speed bump against someone
-           picking up an unlocked phone, not encryption. "Use passphrase
-           instead" always stays one tap away. -->
       <div id="faceid-gate" hidden>
         <button id="faceid-unlock-btn" type="button" class="btn-primary faceid-btn">
           <svg aria-hidden="true"><use href="#icon-faceid" /></svg>
@@ -238,70 +121,44 @@
         </button>
         <button id="faceid-fallback-btn" type="button" class="btn-ghost faceid-btn">Use passphrase instead</button>
       </div>
-
       <form id="pw-form" autocomplete="off">
-        <input id="pw-input" type="password" inputmode="text" placeholder="Passphrase"
-               autocomplete="current-password" aria-label="Dashboard passphrase" />
+        <input id="pw-input" type="password" inputmode="text" placeholder="Passphrase" autocomplete="current-password" aria-label="Dashboard passphrase" />
         <button id="pw-submit" type="submit">Unlock</button>
       </form>
       <p id="pw-error" class="pw-error" role="alert"></p>
     </div>
   </div>
 
-  <!-- ============================= SETTINGS MODAL ============================= -->
-  <div id="settings-modal" class="modal" aria-hidden="true">
+  <div id="settings-modal" class="modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-card">
-      <h2>Settings</h2>
-      <label for="api-key-input">Dashboard command key
-        <span class="hint">(sent as <code>X-Dashboard-Key</code> to the Worker)</span>
-      </label>
-      <input id="api-key-input" type="password" placeholder="Paste your X-Dashboard-Key"
-             autocomplete="off" aria-label="Dashboard command key" />
-      <p class="hint small">Stored locally in this browser only (localStorage <code>phev_dash_api_key</code>).</p>
-
-      <!-- Feature-detected: only shown when the device actually has a
-           platform authenticator (Face ID / Touch ID) available. -->
+      <h2 id="settings-title">Settings</h2>
+      <label for="api-key-input">Dashboard command key</label>
+      <input id="api-key-input" type="password" placeholder="Paste your X-Dashboard-Key" autocomplete="off" aria-label="Dashboard command key" />
+      <p class="hint">Stored only on this device.</p>
       <div class="settings-row" id="faceid-row" hidden>
-        <label class="charge-enable">
+        <label class="check-row">
           <input type="checkbox" id="faceid-toggle" />
           <span>Require Face ID to open this app</span>
         </label>
-        <p class="hint small">Local device check only — a speed bump against a borrowed unlocked
-          phone, not encryption. "Use passphrase instead" always works if Face ID has an issue.</p>
+        <p class="hint">This is a local device check. Your passphrase remains available.</p>
       </div>
-
       <div class="settings-row">
-        <button id="btn-shortcuts-setup" type="button" class="btn-ghost">Set up iPhone Quick Actions →</button>
+        <button id="btn-shortcuts-setup" type="button" class="btn-ghost">Set up iPhone Quick Actions</button>
       </div>
-
       <div class="modal-actions">
+        <button id="settings-close" type="button" class="btn-ghost">Cancel</button>
         <button id="settings-save" type="button" class="btn-primary">Save</button>
-        <button id="settings-close" type="button" class="btn-ghost">Close</button>
       </div>
     </div>
   </div>
 
-  <!-- ============================= QUICK ACTIONS (iOS SHORTCUTS) SETUP =============================
-       There's no native app here, so a real WidgetKit home-screen widget
-       isn't buildable -- Apple's Shortcuts app + its own Home Screen/widget
-       support is the real substitute: each action below becomes a single
-       "Get Contents of URL" Shortcut hitting the Worker directly, skipping
-       the whole dashboard UI. Faster than opening the app for a single
-       command, which is the actual point. Values below are pre-filled with
-       this browser's saved key so they're copy-paste ready, not templates. -->
-  <div id="shortcuts-modal" class="modal" aria-hidden="true">
+  <div id="shortcuts-modal" class="modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
     <div class="modal-card modal-card--wide">
-      <h2>iPhone Quick Actions</h2>
-      <p class="hint">Build each of these once in the Shortcuts app (Get Contents of URL), then
-        Share → Add to Home Screen for a 1-tap icon, or long-press the Home Screen → Edit → Add
-        Widget → Shortcuts to pin up to 4. One tap, no need to open this dashboard at all.</p>
-
+      <h2 id="shortcuts-title">iPhone Quick Actions</h2>
+      <p class="hint">Create a Shortcut with each request below, then add it to your Home Screen.</p>
       <div class="shortcut-field">
         <label>URL</label>
-        <div class="copy-row">
-          <code id="sc-url"></code>
-          <button type="button" class="btn-copy" data-copy-target="sc-url">Copy</button>
-        </div>
+        <div class="copy-row"><code id="sc-url"></code><button type="button" class="btn-copy" data-copy-target="sc-url">Copy</button></div>
       </div>
       <div class="shortcut-field">
         <label>Method</label>
@@ -309,503 +166,258 @@
       </div>
       <div class="shortcut-field">
         <label>Headers</label>
-        <div class="copy-row">
-          <code>Content-Type: application/json</code>
-        </div>
-        <div class="copy-row">
-          <code id="sc-header"></code>
-          <button type="button" class="btn-copy" data-copy-target="sc-header">Copy</button>
-        </div>
+        <div class="copy-row"><code>Content-Type: application/json</code></div>
+        <div class="copy-row"><code id="sc-header"></code><button type="button" class="btn-copy" data-copy-target="sc-header">Copy</button></div>
       </div>
-
       <div id="sc-actions" class="shortcut-actions"></div>
+      <div class="modal-actions"><button id="shortcuts-close" type="button" class="btn-ghost">Close</button></div>
+    </div>
+  </div>
 
+  <div id="command-confirm-modal" class="modal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="command-confirm-title">
+    <div class="modal-card action-sheet">
+      <p class="eyebrow" id="command-confirm-kind">Remote action</p>
+      <h2 id="command-confirm-title">Confirm action</h2>
+      <p class="action-sheet-copy" id="command-confirm-copy"></p>
+      <p class="command-safety-note">The app will wait for the vehicle before it reports success.</p>
       <div class="modal-actions">
-        <button id="shortcuts-close" type="button" class="btn-ghost">Close</button>
+        <button id="command-confirm-cancel" type="button" class="btn-ghost">Cancel</button>
+        <button id="command-confirm" type="button" class="btn-primary">Continue</button>
       </div>
     </div>
   </div>
 
-  <!-- ============================= APP ============================= -->
   <main id="app" class="app">
     <header class="app-header">
-      <div class="header-titles">
-        <h1 id="veh-nickname">—</h1>
-        <p id="veh-model" class="veh-model">—</p>
-        <p id="veh-updated" class="veh-updated">Waiting for data…</p>
+      <div>
+        <h1 id="veh-nickname">Outlander PHEV</h1>
+        <p id="veh-model" class="veh-model">Waiting for vehicle data</p>
+        <p id="veh-updated" class="veh-updated">Last report unavailable</p>
       </div>
       <div class="header-actions">
-        <button id="btn-refresh" class="icon-btn" title="Refresh live status" aria-label="Refresh live status">
-          <svg aria-hidden="true"><use href="#icon-refresh" /></svg>
-        </button>
-        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">
-          <svg aria-hidden="true"><use href="#icon-gear" /></svg>
-        </button>
-        <button id="btn-logout" class="icon-btn" title="Log out" aria-label="Log out">
-          <svg aria-hidden="true"><use href="#icon-power" /></svg>
-        </button>
+        <button id="btn-refresh" class="icon-btn" title="Refresh vehicle status" aria-label="Refresh vehicle status"><svg aria-hidden="true"><use href="#icon-refresh" /></svg></button>
+        <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings"><svg aria-hidden="true"><use href="#icon-gear" /></svg></button>
+        <button id="btn-logout" class="icon-btn" title="Lock app" aria-label="Lock app"><svg aria-hidden="true"><use href="#icon-power" /></svg></button>
       </div>
     </header>
 
-    <!-- =============== STATUS TAB =============== -->
     <div class="tab-view is-active" id="tab-status" data-tab="status" role="tabpanel" aria-label="Status">
+      <section class="status-card" aria-live="polite">
+        <div class="section-row">
+          <p class="eyebrow">Current status</p>
+          <span id="home-state" class="status-pill">Waiting for report</span>
+        </div>
+        <h2 id="home-title">Vehicle status unavailable</h2>
+        <p id="home-detail" class="status-copy">Unlock the dashboard to see the most recent report.</p>
+        <div class="essential-metrics" aria-label="Key vehicle information">
+          <div><span>Battery</span><strong class="skeleton" data-field="battery">—</strong></div>
+          <div><span>Electric range</span><strong class="skeleton" data-field="ev_range">—</strong></div>
+          <div><span>Total range</span><strong class="skeleton" data-field="total_range">—</strong></div>
+        </div>
+      </section>
 
-      <!-- A single quiet glance card. The car layer is data-led: access,
-           lights and charge only react to a vehicle report; climate/command
-           motion waits for a confirmed operation receipt. -->
-      <section class="vehicle-hero is-waiting" id="vehicle-hero" aria-labelledby="vehicle-card-title">
-        <div class="vehicle-hero-top">
+      <section class="section-card">
+        <div class="section-row">
           <div>
-            <p class="section-kicker">Your Outlander</p>
-            <h2 id="vehicle-card-title">Ready when you are</h2>
+            <p class="eyebrow">Quick actions</p>
+            <h2>Use deliberately</h2>
           </div>
-          <span class="vehicle-live-state" id="vehicle-live-state">Waiting for report</span>
         </div>
-
-        <div class="vehicle-stage" role="img" aria-labelledby="vehicle-visual-title vehicle-visual-desc">
-          <span class="vehicle-visual-title" id="vehicle-visual-title">Live vehicle visual</span>
-          <p class="sr-only" id="vehicle-visual-desc">Waiting for the most recent vehicle report.</p>
-          <div class="digital-twin" id="digital-twin" aria-hidden="true">
-            <span class="twin-ground-shadow"></span>
-            <span class="twin-command-ring"></span>
-            <span class="twin-locate-ping"></span>
-            <span class="twin-light-beam twin-light-beam--left"></span>
-            <span class="twin-light-beam twin-light-beam--right"></span>
-            <span class="twin-climate-wave twin-climate-wave--one"></span>
-            <span class="twin-climate-wave twin-climate-wave--two"></span>
-            <img class="digital-twin-base" src="assets/vehicle/dge-top.png" alt="" />
-            <img class="digital-twin-interior" src="assets/vehicle/dge-interior.png" alt="" />
-            <span class="twin-door twin-door--front-left" data-vehicle-door="front_left"></span>
-            <span class="twin-door twin-door--front-right" data-vehicle-door="front_right"></span>
-            <span class="twin-door twin-door--rear-left" data-vehicle-door="rear_left"></span>
-            <span class="twin-door twin-door--rear-right" data-vehicle-door="rear_right"></span>
-            <span class="twin-charge-port"></span>
-            <span class="twin-charge-flow"></span>
-            <span class="twin-command-label" id="vehicle-command-label" hidden></span>
-          </div>
-          <div class="vehicle-energy" aria-label="Battery charge">
-            <strong id="vehicle-hero-battery">—</strong><span id="vehicle-hero-battery-unit" hidden>%</span>
-            <small>battery</small>
-          </div>
-          <div class="vehicle-access-glyph" id="vehicle-access-glyph" hidden aria-hidden="true">
-            <img id="door-state-glyph" src="assets/vehicle/doors_all_closed.png" alt="" />
-          </div>
-          <span class="vehicle-open-detail" id="vehicle-open-detail" hidden></span>
+        <div class="quick-actions" id="quick-actions">
+          <button type="button" class="quick-action quick-action--primary" data-remote-action="lock">
+            <svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Lock</span>
+          </button>
+          <button type="button" class="quick-action" data-remote-action="unlock">
+            <svg aria-hidden="true"><use href="#icon-unlock" /></svg><span>Unlock</span>
+          </button>
+          <button type="button" class="quick-action" data-remote-action="locate">
+            <svg aria-hidden="true"><use href="#icon-locate" /></svg><span>Find vehicle</span>
+          </button>
         </div>
-
-        <div class="vehicle-signals" aria-live="polite">
-          <div class="vehicle-signal" id="vehicle-access-signal"><span>Access</span><strong id="vehicle-access-state">Checking</strong></div>
-          <div class="vehicle-signal" id="vehicle-lights-signal"><span>Lights</span><strong id="vehicle-lights-state">Checking</strong></div>
-          <div class="vehicle-signal" id="vehicle-charge-signal"><span>Charge</span><strong id="vehicle-charge-state">Checking</strong></div>
-          <div class="vehicle-signal" id="vehicle-climate-signal"><span>Climate</span><strong id="vehicle-climate-state">Off</strong></div>
-        </div>
-        <p class="vehicle-hero-note">The visual never invents vehicle state. It only reflects the latest report or a confirmed remote action.</p>
+        <p class="section-note">Every command has a confirmation step and reports the vehicle outcome, not just a submitted request.</p>
+        <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
       </section>
 
-      <section class="primary-metrics" id="tiles" aria-label="Energy and range">
-        <div class="metric metric--battery" id="tile-battery">
-          <span class="metric-label">Battery</span>
-          <span class="metric-value skeleton" data-field="battery">—</span>
-          <div class="battery-bar"><div class="battery-fill" id="battery-fill"></div></div>
-        </div>
-        <div class="metric"><span class="metric-label">Electric range</span><span class="metric-value skeleton" data-field="ev_range">—</span></div>
-        <div class="metric"><span class="metric-label">Total range</span><span class="metric-value skeleton" data-field="total_range">—</span></div>
-        <div class="metric"><span class="metric-label">Charging</span><span class="metric-value skeleton" data-field="charging">—</span></div>
-      </section>
-
-      <section class="overview-row" aria-label="Vehicle health and location">
-        <article class="overview-card" id="vehicle-health-panel">
-          <span class="overview-label">Vehicle health</span>
+      <section class="info-stack" aria-label="Vehicle health and location">
+        <article class="info-card" id="vehicle-health-panel">
+          <span class="info-label">Vehicle health</span>
           <strong id="vehicle-health-summary">Waiting for report</strong>
-          <span class="overview-detail">Battery condition <b id="vehicle-health-battery">—</b></span>
+          <span class="info-detail">Battery metric <b id="vehicle-health-battery">—</b></span>
         </article>
-        <article class="overview-card location-card" id="location-panel" hidden>
-          <span class="overview-label">Vehicle location</span>
+        <article class="info-card" id="location-panel" hidden>
+          <span class="info-label">Vehicle location</span>
           <strong id="location-coordinates">—</strong>
-          <span class="overview-detail" id="location-availability">Not reported</span>
+          <span class="info-detail" id="location-availability">Not reported</span>
           <a class="text-link" id="location-open" href="#" target="_blank" rel="noopener">Open in Maps</a>
         </article>
       </section>
 
-      <!-- Only shown when this specific health response marks a condition. -->
-      <section class="alert-card" id="warnings-panel" hidden>
-        <span class="overview-label">Needs attention</span>
+      <section class="warning-card" id="warnings-panel" hidden>
+        <p class="eyebrow">Needs attention</p>
         <div class="warnings" id="warnings"></div>
       </section>
-
-      <details class="overview-disclosure">
-        <summary>More vehicle details</summary>
-        <div class="secondary-metrics">
-          <div><span>Gas range</span><strong class="skeleton" data-field="gas_range">—</strong></div>
-          <div><span>Plugged in</span><strong class="skeleton" data-field="plugged">—</strong></div>
-          <div><span>Time to full</span><strong class="skeleton" data-field="ttf">—</strong></div>
-          <div><span>Odometer</span><strong class="skeleton" data-field="odometer">—</strong></div>
-        </div>
-      </details>
-
-    <!-- Driving score: rides inside the same VHR response as tire pressure,
-         not a separate call. Hidden unless the account has any recent
-         driving history to score. -->
-    <section class="compact-panel" id="driving-score-panel" hidden>
-      <h2 class="panel-title">Driving score</h2>
-      <div class="score-grid">
-        <div><span>Overall</span><strong data-field="ds_overall">—</strong></div>
-        <div><span>Acceleration</span><strong data-field="ds_accel">—</strong></div>
-        <div><span>Steering</span><strong data-field="ds_steer">—</strong></div>
-        <div><span>Braking</span><strong data-field="ds_brake">—</strong></div>
-        <div><span>Fuel economy</span><strong data-field="ds_fuel">—</strong></div>
-      </div>
-    </section>
-
-    <!-- Vehicle flags: live-only (GET /state), not part of the hourly
-         snapshot -- populated after the first live refresh, not on initial
-         cached-data paint. -->
-    <section class="compact-panel" id="flags-panel" hidden>
-      <h2 class="panel-title">Vehicle flags</h2>
-      <div class="flags" id="flags"></div>
-    </section>
-
-      <footer class="app-footer">
-        <span id="veh-vin">—</span>
-      </footer>
     </div>
 
-    <!-- =============== CLIMATE TAB =============== -->
     <div class="tab-view" id="tab-climate" data-tab="climate" role="tabpanel" aria-label="Climate">
-
-    <!-- ===================== CLIMATE & COMFORT =====================
-         Comfort zones are LOCAL toggles (armed = pending selection). Nothing is
-         sent until "Start climate" submits the whole config in ONE request:
-         { action:"climate", minutes, temperatureC, options:[...] }. -->
-    <section class="panel climate-panel" id="climate-panel">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-fan" /></svg>
-        Climate &amp; comfort
-      </h2>
-
-      <div class="config-row">
-        <span class="config-label">Run for</span>
-        <div class="duration-select" id="duration-select" role="group" aria-label="Command duration">
-          <button type="button" class="duration-opt" data-minutes="5">5m</button>
-          <button type="button" class="duration-opt active" data-minutes="10">10m</button>
-          <button type="button" class="duration-opt" data-minutes="20">20m</button>
-          <button type="button" class="duration-opt" data-minutes="30">30m</button>
+      <section class="climate-card" id="climate-panel">
+        <div class="section-row">
+          <div>
+            <p class="eyebrow">Climate</p>
+            <h2>Set the cabin, then start</h2>
+          </div>
+          <span id="climate-state" class="status-pill">Off</span>
         </div>
-      </div>
+        <p class="section-note">Nothing is sent until you choose Start climate.</p>
 
-      <div class="config-row config-row--divider">
-        <span class="config-label">Temperature</span>
-        <div class="temp-stepper" role="group" aria-label="Cabin temperature">
-          <button type="button" class="temp-step" data-temp-step="-1" aria-label="Lower temperature">−</button>
-          <span class="temp-value" id="temp-value" aria-live="polite">22°C</span>
-          <button type="button" class="temp-step" data-temp-step="1" aria-label="Raise temperature">+</button>
+        <div class="climate-presets" role="group" aria-label="Climate presets">
+          <button type="button" class="climate-preset" data-preset="cabin_heat">Warm cabin</button>
+          <button type="button" class="climate-preset" data-preset="clear_windshield">Clear windshield</button>
+          <button type="button" class="climate-preset" data-preset="rear_glass">Rear glass</button>
         </div>
-      </div>
 
-      <div class="climate-presets" role="group" aria-label="Climate presets">
-        <button type="button" class="climate-preset" data-preset="cabin_heat">Cabin heat</button>
-        <button type="button" class="climate-preset climate-preset--clear" data-preset="clear_windshield">Clear windshield</button>
-        <button type="button" class="climate-preset" data-preset="rear_glass">Rear glass</button>
-      </div>
-      <p class="climate-preset-hint">Choose a preset or set the cabin yourself.</p>
-
-      <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
-        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
-        <span class="climate-master-label">Start climate</span>
-      </button>
-      <!-- Hidden until a climate start is confirmed running. -->
-      <button type="button" class="climate-stop" id="climate-stop" hidden aria-label="Stop the running climate session">
-        <svg aria-hidden="true"><use href="#icon-stop" /></svg>
-        Stop climate
-      </button>
-
-      <details class="climate-options">
-        <summary>Comfort options</summary>
-        <p>Select equipment before starting climate. Availability comes from the vehicle.</p>
-      <!-- Seat heaters, laid out where the seats actually are. Tap = arm (local). -->
-      <div class="seat-diagram" role="group" aria-label="Seat heaters">
-        <svg class="seat-cabin" viewBox="0 0 300 210" aria-hidden="true">
-          <path class="seat-cabin-shell" d="M150 10c41 0 66 26 76 67l9 42c7 36-14 73-50 80-23 5-47 5-70 0-36-7-57-44-50-80l9-42c10-41 35-67 76-67z" />
-          <path class="seat-cabin-glass" d="M150 29c29 0 47 18 56 51l5 23c3 17-9 37-27 42-22 6-46 6-68 0-18-5-30-25-27-42l5-23c9-33 27-51 56-51z" />
-          <path class="seat-cabin-console" d="M150 45v119" />
-          <path class="seat-cabin-row" d="M91 109h118M84 154h132" />
-          <circle class="seat-cabin-wheel" cx="150" cy="72" r="14" />
-        </svg>
-        <div class="seat-grid">
-          <button type="button" class="seat-btn comfort-toggle" data-option="seat_fl" aria-pressed="false" aria-label="Front left seat heater">
-            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
-            <span class="seat-pos">Front L</span>
-          </button>
-          <button type="button" class="seat-btn comfort-toggle" data-option="seat_fr" aria-pressed="false" aria-label="Front right seat heater">
-            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
-            <span class="seat-pos">Front R</span>
-          </button>
-          <button type="button" class="seat-btn comfort-toggle" data-option="seat_rl" aria-pressed="false" aria-label="Rear left seat heater">
-            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
-            <span class="seat-pos">Rear L</span>
-          </button>
-          <button type="button" class="seat-btn comfort-toggle" data-option="seat_rr" aria-pressed="false" aria-label="Rear right seat heater">
-            <svg aria-hidden="true"><use href="#icon-seat" /></svg>
-            <span class="seat-pos">Rear R</span>
-          </button>
+        <div class="setting-list">
+          <div class="setting-row">
+            <span>Run for</span>
+            <div class="duration-select" id="duration-select" role="group" aria-label="Climate duration">
+              <button type="button" class="duration-opt" data-minutes="5">5m</button>
+              <button type="button" class="duration-opt active" data-minutes="10">10m</button>
+              <button type="button" class="duration-opt" data-minutes="20">20m</button>
+              <button type="button" class="duration-opt" data-minutes="30">30m</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <span>Cabin temperature</span>
+            <div class="temp-stepper" role="group" aria-label="Cabin temperature">
+              <button type="button" class="temp-step" data-temp-step="-1" aria-label="Lower temperature">−</button>
+              <span class="temp-value" id="temp-value" aria-live="polite">22°C</span>
+              <button type="button" class="temp-step" data-temp-step="1" aria-label="Raise temperature">+</button>
+            </div>
+          </div>
         </div>
-      </div>
 
-      <div class="hvac-row">
-        <button type="button" class="hvac-btn comfort-toggle" data-option="steering_heat" aria-pressed="false">
-          <svg aria-hidden="true"><use href="#icon-steering" /></svg> Wheel heat
+        <button type="button" class="climate-master" id="climate-start">
+          <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+          <span class="climate-master-label">Start climate</span>
         </button>
-        <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_front" aria-pressed="false">
-          <svg aria-hidden="true"><use href="#icon-defrost-front" /></svg> Front defrost
+        <button type="button" class="climate-stop" id="climate-stop" hidden>
+          <svg aria-hidden="true"><use href="#icon-stop" /></svg>
+          Stop climate
         </button>
-        <button type="button" class="hvac-btn comfort-toggle" data-option="defrost_rear" aria-pressed="false">
-          <svg aria-hidden="true"><use href="#icon-defrost-rear" /></svg> Rear defrost
-        </button>
-        <!-- Not the same thing as front/rear defrost: this is the top-level
-             "def" flag, independent of frontDefrostMode/rearDefrostMode, and
-             the car can run it alongside either. -->
-        <button type="button" class="hvac-btn comfort-toggle" data-option="max_defrost" aria-pressed="false">
-          <svg aria-hidden="true"><use href="#icon-fan-max" /></svg> Max defrost
-        </button>
-      </div>
 
-      <!-- Populated from GET /config after unlock. “Reported” means the
-           vehicle itself exposed that control in its remoteAC settings;
-           “confirmed” is reserved for an operation result from the vehicle. -->
-      <div class="vehicle-support" id="vehicle-support" aria-live="polite">
-        <span class="vehicle-support-status" id="vehicle-support-status">Checking vehicle support…</span>
-        <div class="vehicle-support-chips" id="vehicle-support-chips" hidden></div>
-      </div>
-      <details class="service-discovery" id="service-discovery" hidden>
-        <summary id="service-discovery-summary">API-reported services</summary>
-        <div class="vehicle-support-chips" id="service-discovery-chips"></div>
-      </details>
-      </details>
-    </section>
+        <details class="advanced-options">
+          <summary>Comfort options</summary>
+          <p>These settings are only applied when climate starts. Controls marked unavailable are reported unsupported by the vehicle.</p>
+          <div class="comfort-grid" role="group" aria-label="Comfort options">
+            <button type="button" class="comfort-toggle" data-option="seat_fl" aria-pressed="false">Driver seat</button>
+            <button type="button" class="comfort-toggle" data-option="seat_fr" aria-pressed="false">Front passenger seat</button>
+            <button type="button" class="comfort-toggle" data-option="seat_rl" aria-pressed="false">Rear left seat</button>
+            <button type="button" class="comfort-toggle" data-option="seat_rr" aria-pressed="false">Rear right seat</button>
+            <button type="button" class="comfort-toggle" data-option="steering_heat" aria-pressed="false">Steering wheel</button>
+            <button type="button" class="comfort-toggle" data-option="defrost_front" aria-pressed="false">Front defrost</button>
+            <button type="button" class="comfort-toggle" data-option="defrost_rear" aria-pressed="false">Rear defrost</button>
+            <button type="button" class="comfort-toggle" data-option="max_defrost" aria-pressed="false">Max defrost</button>
+          </div>
+          <div class="vehicle-support" id="vehicle-support" aria-live="polite">
+            <span class="vehicle-support-status" id="vehicle-support-status">Checking vehicle support…</span>
+            <div class="vehicle-support-chips" id="vehicle-support-chips" hidden></div>
+          </div>
+          <details class="service-discovery" id="service-discovery" hidden>
+            <summary id="service-discovery-summary">Vehicle-reported services</summary>
+            <div class="vehicle-support-chips" id="service-discovery-chips"></div>
+          </details>
+        </details>
+      </section>
     </div>
 
-    <!-- =============== CONTROLS TAB =============== -->
-    <div class="tab-view" id="tab-controls" data-tab="controls" role="tabpanel" aria-label="Controls">
+    <div class="tab-view" id="tab-vehicle" data-tab="vehicle" role="tabpanel" aria-label="Vehicle">
+      <section class="section-card">
+        <p class="eyebrow">Vehicle condition</p>
+        <h2>Access and lights</h2>
+        <div class="condition-list" id="doors">
+          <div class="door" data-door="front_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front left door</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="front_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front right door</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="rear_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear left door</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="rear_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear right door</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="hood"><svg aria-hidden="true"><use href="#icon-hood" /></svg><span class="door-name">Hood</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="trunk"><svg aria-hidden="true"><use href="#icon-trunk" /></svg><span class="door-name">Liftgate</span><span class="door-state skeleton">—</span></div>
+          <div class="door" data-door="headlights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span class="door-name">Headlights</span><span class="door-state skeleton">—</span></div>
+        </div>
+      </section>
 
-    <!-- A short, ordered control surface. Each result is only called confirmed
-         after the vehicle operation reaches its terminal response. -->
-    <section class="control-panel panel-commands">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-lock" /></svg>
-        Remote control
-      </h2>
-      <p class="panel-intro">Commands wait for the vehicle before they claim success.</p>
-      <div class="commands" id="commands">
-        <div class="command-group">
-          <button class="cmd-btn cmd-btn--primary" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Lock</span></button>
-          <button class="cmd-btn cmd-btn--caution" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg><span>Unlock</span></button>
+      <section class="section-card">
+        <p class="eyebrow">Tire pressure</p>
+        <h2>Reported pressure <span class="unit-label">bar</span></h2>
+        <div class="tire-grid" id="tires">
+          <div class="tire"><span>Front left</span><strong><b class="skeleton" data-tire-field="front_left">—</b> bar</strong></div>
+          <div class="tire"><span>Front right</span><strong><b class="skeleton" data-tire-field="front_right">—</b> bar</strong></div>
+          <div class="tire"><span>Rear left</span><strong><b class="skeleton" data-tire-field="rear_left">—</b> bar</strong></div>
+          <div class="tire"><span>Rear right</span><strong><b class="skeleton" data-tire-field="rear_right">—</b> bar</strong></div>
         </div>
-        <div class="command-group">
-          <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg><span>Find vehicle</span></button>
-          <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span>Flash lights</span></button>
-          <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg><span>Horn</span></button>
-        </div>
-        <div class="command-group command-group--charge">
-          <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg><span>Start charge</span></button>
-          <button class="cmd-btn cmd-btn--stop" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg><span>Stop charge</span></button>
-        </div>
-      </div>
-      <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
-    </section>
+      </section>
 
-    <!-- Doors & lights -->
-    <section class="compact-panel access-panel">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-door" /></svg>
-        Doors &amp; lights
-      </h2>
-      <div class="doors" id="doors">
-        <div class="door" data-door="front_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front L</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="front_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Front R</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="rear_left"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear L</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="rear_right"><svg aria-hidden="true"><use href="#icon-door" /></svg><span class="door-name">Rear R</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="hood"><svg aria-hidden="true"><use href="#icon-hood" /></svg><span class="door-name">Hood</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="trunk"><svg aria-hidden="true"><use href="#icon-trunk" /></svg><span class="door-name">Trunk</span><span class="door-state skeleton">—</span></div>
-        <div class="door" data-door="headlights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span class="door-name">Lights</span><span class="door-state skeleton">—</span></div>
-      </div>
-    </section>
-
-    <!-- Tire pressure -->
-    <section class="compact-panel tire-panel">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-tire" /></svg>
-        Tire pressure <span class="panel-unit">(bar)</span>
-      </h2>
-      <div class="tires" id="tires">
-        <div class="tire" data-tire="front_left"><span class="tire-pos">Front L</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="front_left">—</span><span class="tire-unit">bar</span></span></div>
-        <div class="tire" data-tire="front_right"><span class="tire-pos">Front R</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="front_right">—</span><span class="tire-unit">bar</span></span></div>
-        <div class="tire" data-tire="rear_left"><span class="tire-pos">Rear L</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="rear_left">—</span><span class="tire-unit">bar</span></span></div>
-        <div class="tire" data-tire="rear_right"><span class="tire-pos">Rear R</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="rear_right">—</span><span class="tire-unit">bar</span></span></div>
-      </div>
-    </section>
-
-    <!-- Charging schedule (operation "chargingControl2") — the vehicle always
-         holds exactly 3 timer slots, so this always shows 3, not an "add
-         timer" list. An unchecked timer is saved disabled, not omitted.
-         Loaded from the vehicle on tab load; nothing is sent until Save. -->
-    <details class="scheduler-panel" id="charging-schedule-panel">
-      <summary><span>Charging schedule</span><span>Manage</span></summary>
-      <div class="scheduler-content">
-      <p class="schedule-hint" id="schedule-status">Loading current schedule…</p>
-
-      <div class="charge-timer" data-timer="0">
-        <div class="charge-timer-head">
-          <label class="charge-enable">
-            <input type="checkbox" class="charge-timer-enable" />
-            <span>Timer 1</span>
-          </label>
+      <details class="vehicle-disclosure">
+        <summary>More vehicle controls</summary>
+        <p>These actions can be disruptive. Confirm before the request is sent.</p>
+        <div class="tool-actions" id="commands">
+          <button type="button" class="tool-action" data-remote-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span>Flash lights</span></button>
+          <button type="button" class="tool-action" data-remote-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg><span>Sound horn</span></button>
+          <button type="button" class="tool-action" data-remote-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg><span>Start charging</span></button>
+          <button type="button" class="tool-action tool-action--danger" data-remote-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg><span>Stop charging</span></button>
         </div>
-        <div class="charge-time-row">
-          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
-          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
-        </div>
-        <div class="charge-days" role="group" aria-label="Timer 1 days">
-          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
-          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
-          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
-          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
-          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
-          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
-          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
-        </div>
-      </div>
+      </details>
 
-      <div class="charge-timer" data-timer="1">
-        <div class="charge-timer-head">
-          <label class="charge-enable">
-            <input type="checkbox" class="charge-timer-enable" />
-            <span>Timer 2</span>
-          </label>
+      <details class="vehicle-disclosure" id="charging-schedule-panel">
+        <summary>Charging schedule</summary>
+        <div class="disclosure-content">
+          <p class="schedule-hint" id="schedule-status">Unlock to load the vehicle schedule.</p>
+          <div class="charge-timer" data-timer="0">
+            <label class="check-row"><input type="checkbox" class="charge-timer-enable" /><span>Timer 1</span></label>
+            <div class="time-row"><label>Start <input type="time" class="charge-timer-start" value="00:00" /></label><label>End <input type="time" class="charge-timer-end" value="06:00" /></label></div>
+            <div class="day-row" role="group" aria-label="Timer 1 days"><button type="button" class="charge-day-btn" data-day="Mon">M</button><button type="button" class="charge-day-btn" data-day="Tue">T</button><button type="button" class="charge-day-btn" data-day="Wed">W</button><button type="button" class="charge-day-btn" data-day="Thu">T</button><button type="button" class="charge-day-btn" data-day="Fri">F</button><button type="button" class="charge-day-btn" data-day="Sat">S</button><button type="button" class="charge-day-btn" data-day="Sun">S</button></div>
+          </div>
+          <div class="charge-timer" data-timer="1">
+            <label class="check-row"><input type="checkbox" class="charge-timer-enable" /><span>Timer 2</span></label>
+            <div class="time-row"><label>Start <input type="time" class="charge-timer-start" value="00:00" /></label><label>End <input type="time" class="charge-timer-end" value="06:00" /></label></div>
+            <div class="day-row" role="group" aria-label="Timer 2 days"><button type="button" class="charge-day-btn" data-day="Mon">M</button><button type="button" class="charge-day-btn" data-day="Tue">T</button><button type="button" class="charge-day-btn" data-day="Wed">W</button><button type="button" class="charge-day-btn" data-day="Thu">T</button><button type="button" class="charge-day-btn" data-day="Fri">F</button><button type="button" class="charge-day-btn" data-day="Sat">S</button><button type="button" class="charge-day-btn" data-day="Sun">S</button></div>
+          </div>
+          <div class="charge-timer" data-timer="2">
+            <label class="check-row"><input type="checkbox" class="charge-timer-enable" /><span>Timer 3</span></label>
+            <div class="time-row"><label>Start <input type="time" class="charge-timer-start" value="00:00" /></label><label>End <input type="time" class="charge-timer-end" value="06:00" /></label></div>
+            <div class="day-row" role="group" aria-label="Timer 3 days"><button type="button" class="charge-day-btn" data-day="Mon">M</button><button type="button" class="charge-day-btn" data-day="Tue">T</button><button type="button" class="charge-day-btn" data-day="Wed">W</button><button type="button" class="charge-day-btn" data-day="Thu">T</button><button type="button" class="charge-day-btn" data-day="Fri">F</button><button type="button" class="charge-day-btn" data-day="Sat">S</button><button type="button" class="charge-day-btn" data-day="Sun">S</button></div>
+          </div>
+          <button type="button" class="save-button" id="schedule-save">Save charging schedule</button>
         </div>
-        <div class="charge-time-row">
-          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
-          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
-        </div>
-        <div class="charge-days" role="group" aria-label="Timer 2 days">
-          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
-          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
-          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
-          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
-          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
-          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
-          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
-        </div>
-      </div>
+      </details>
 
-      <div class="charge-timer" data-timer="2">
-        <div class="charge-timer-head">
-          <label class="charge-enable">
-            <input type="checkbox" class="charge-timer-enable" />
-            <span>Timer 3</span>
-          </label>
+      <details class="vehicle-disclosure" id="climate-schedule-panel" aria-describedby="climate-schedule-status climate-schedule-note">
+        <summary>Climate schedule</summary>
+        <div class="disclosure-content">
+          <p class="schedule-hint" id="climate-schedule-status">Unlock to load the vehicle schedule.</p>
+          <p class="schedule-guard" id="climate-schedule-note">“Ready by” is a departure time. The vehicle must be parked, off, in Park, and closed/locked when it runs.</p>
+          <div class="climate-schedule-timers" id="climate-schedule-timers"></div>
+          <button type="button" class="save-button" id="climate-schedule-save" disabled>Save climate schedule</button>
         </div>
-        <div class="charge-time-row">
-          <label>Start <input type="time" class="charge-timer-start" value="00:00" /></label>
-          <label>End <input type="time" class="charge-timer-end" value="06:00" /></label>
-        </div>
-        <div class="charge-days" role="group" aria-label="Timer 3 days">
-          <button type="button" class="charge-day-btn" data-day="Mon">M</button>
-          <button type="button" class="charge-day-btn" data-day="Tue">T</button>
-          <button type="button" class="charge-day-btn" data-day="Wed">W</button>
-          <button type="button" class="charge-day-btn" data-day="Thu">T</button>
-          <button type="button" class="charge-day-btn" data-day="Fri">F</button>
-          <button type="button" class="charge-day-btn" data-day="Sat">S</button>
-          <button type="button" class="charge-day-btn" data-day="Sun">S</button>
-        </div>
-      </div>
+      </details>
 
-      <button type="button" class="climate-master" id="schedule-save">
-        <svg aria-hidden="true"><use href="#icon-bolt" /></svg>
-        <span>Save schedule</span>
-      </button>
-      </div>
-    </details>
-
-    <!-- Climate scheduling is a vehicle-side recurring pre-conditioning timer.
-         The app creates exactly three slots. The editor is built only after
-         the Worker reads those slots, so it can preserve each vehicle-reported
-         target temperature and HVAC setting rather than guessing fields. -->
-    <details class="scheduler-panel" id="climate-schedule-panel" aria-describedby="climate-schedule-status climate-schedule-note">
-      <summary><span>Climate schedule</span><span>Manage</span></summary>
-      <div class="scheduler-content">
-      <p class="schedule-hint" id="climate-schedule-status">Unlock to load the vehicle schedule.</p>
-      <p class="schedule-guard" id="climate-schedule-note">
-        “Ready by” is a departure time. Saved cabin target and climate options stay unchanged. At run time, the vehicle must be parked, off, in Park, and closed/locked.
-      </p>
-      <div class="climate-schedule-timers" id="climate-schedule-timers"></div>
-      <button type="button" class="climate-master" id="climate-schedule-save" disabled>
-        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
-        <span>Save climate schedule</span>
-      </button>
-      </div>
-    </details>
-    </div>
-
-    <!-- =============== HISTORY TAB =============== -->
-    <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="History">
-
-    <!-- Charts -->
-    <section class="history-card">
-      <h2 class="panel-title">Battery history</h2>
-      <div class="chart-wrap"><canvas id="chart-battery"></canvas></div>
-      <p class="chart-empty" id="empty-battery" hidden>No history yet.</p>
-    </section>
-    <section class="history-card">
-      <h2 class="panel-title">Odometer history</h2>
-      <div class="chart-wrap"><canvas id="chart-odometer"></canvas></div>
-      <p class="chart-empty" id="empty-odometer" hidden>No history yet.</p>
-    </section>
-    <section class="history-card">
-      <h2 class="panel-title">Daily distance</h2>
-      <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
-      <p class="chart-empty" id="empty-daily" hidden>No history yet.</p>
-    </section>
-    <section class="history-card">
-      <h2 class="panel-title">Monthly distance</h2>
-      <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
-      <p class="chart-empty" id="empty-monthly" hidden>No history yet.</p>
-    </section>
+      <section class="section-card vehicle-flags" id="flags-panel" hidden>
+        <p class="eyebrow">Vehicle flags</p>
+        <div class="flags" id="flags"></div>
+      </section>
+      <p class="app-footer" id="veh-vin">—</p>
     </div>
   </main>
 
-  <!-- ============================= BOTTOM TAB BAR ============================= -->
   <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
-    <button type="button" class="tab-btn active" data-tab="status" role="tab" aria-selected="true" aria-controls="tab-status">
-      <svg aria-hidden="true"><use href="#icon-gauge" /></svg>
-      <span>Home</span>
-    </button>
-    <button type="button" class="tab-btn" data-tab="climate" role="tab" aria-selected="false" aria-controls="tab-climate">
-      <svg aria-hidden="true"><use href="#icon-fan" /></svg>
-      <span>Climate</span>
-    </button>
-    <button type="button" class="tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="tab-controls">
-      <svg aria-hidden="true"><use href="#icon-lock" /></svg>
-      <span>Vehicle</span>
-    </button>
-    <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history">
-      <svg aria-hidden="true"><use href="#icon-chart" /></svg>
-      <span>Trends</span>
-    </button>
+    <button type="button" class="tab-btn active" data-tab="status" role="tab" aria-selected="true" aria-controls="tab-status"><svg aria-hidden="true"><use href="#icon-home" /></svg><span>Home</span></button>
+    <button type="button" class="tab-btn" data-tab="climate" role="tab" aria-selected="false" aria-controls="tab-climate"><svg aria-hidden="true"><use href="#icon-fan" /></svg><span>Climate</span></button>
+    <button type="button" class="tab-btn" data-tab="vehicle" role="tab" aria-selected="false" aria-controls="tab-vehicle"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Vehicle</span></button>
   </nav>
 
-  <!-- Toast container -->
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
-
-  <!-- Chart.js (UMD global `Chart`) then our chart module -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
-
-  <!-- App modules (plain scripts, communicate through window.PHEV) -->
   <script src="crypto.js" defer></script>
   <script src="app.js" defer></script>
   <script src="pull-refresh.js" defer></script>
   <script src="shortcuts-setup.js" defer></script>
-  <script src="charts.js" defer></script>
   <script src="nav.js" defer></script>
-
 </body>
 </html>

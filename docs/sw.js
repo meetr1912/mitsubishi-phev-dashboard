@@ -10,13 +10,12 @@
  * Bump CACHE_NAME whenever the shell asset list changes so activate() cleans
  * out the old version.
  */
-var CACHE_NAME = "phev-shell-v7";
+var CACHE_NAME = "phev-shell-v8";
 var SHELL_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
-  "./charts.js",
   "./crypto.js",
   "./nav.js",
   "./pull-refresh.js",

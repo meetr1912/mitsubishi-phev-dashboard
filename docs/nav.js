@@ -1,12 +1,9 @@
-/* nav.js — bottom tab-bar section navigation.
- * Plain IIFE, no dependencies. Shows/hides the four .tab-view wrappers via an
- * `is-active` class (nodes are never destroyed) and keeps the tab-bar buttons
- * in sync. On each switch it nudges the size-sensitive widgets that were hidden
- * (Chart.js canvases, the three.js hero) so they measure their now-visible box. */
+/* nav.js — three task-focused sections. Nodes stay mounted so a climate
+ * selection or schedule draft is never lost while switching sections. */
 (function () {
   "use strict";
 
-  var TABS = ["status", "climate", "controls", "history"];
+  var TABS = ["status", "climate", "vehicle"];
   var bar = document.querySelector(".tab-bar");
   var views = {};
   TABS.forEach(function (t) { views[t] = document.getElementById("tab-" + t); });
@@ -29,13 +26,8 @@
     // Fresh tab starts at the top.
     window.scrollTo(0, 0);
 
-    // The newly-visible tab may hold widgets that were sized while display:none.
-    // Nudge them after the browser has applied the layout change.
+    // Let any native controls reflow after the new section is visible.
     requestAnimationFrame(function () {
-      if (name === "history" && window.PHEV && typeof window.PHEV.resizeCharts === "function") {
-        window.PHEV.resizeCharts();
-      }
-      // The status SVG is responsive through CSS; charts respond to this resize.
       window.dispatchEvent(new Event("resize"));
     });
   }
