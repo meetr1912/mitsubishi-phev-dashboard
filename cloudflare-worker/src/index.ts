@@ -1415,7 +1415,13 @@ function scalar(value: JsonValue | undefined): JsonValue | undefined {
   return value;
 }
 
-/** cruisingRangeFirst/Second come back as [{"range":"X"},{"engineType":"Y"}]. */
+/**
+ * Cruising ranges appear in two valid shapes in Mitsubishi responses:
+ * a flat list of { range }, or a diagnostic wrapper containing
+ * { cruisingRange: [{ range_*: { value } }] }. Keep this deliberately
+ * structural rather than model-specific so the dashboard doesn't lose range
+ * on the health-report shape used by the companion app.
+ */
 function extractRange(value: JsonValue | undefined): JsonValue | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -1423,8 +1429,27 @@ function extractRange(value: JsonValue | undefined): JsonValue | undefined {
         return item.range;
       }
     }
-    return undefined;
   }
+  // The native health payload names these wrappers range_1 / range_2 rather
+  // than simply range. Look for the named wrapper, then return its scalar
+  // value instead of handing a whole diagnostic object to toInt().
+  const findNamedRange = (candidate: JsonValue | undefined): JsonValue | undefined => {
+    if (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) {
+      for (const [key, nested] of Object.entries(candidate)) {
+        if (/^range(?:[_-]?\d+)?$/i.test(key)) return nested;
+        const found = findNamedRange(nested);
+        if (found !== undefined) return found;
+      }
+    } else if (Array.isArray(candidate)) {
+      for (const nested of candidate) {
+        const found = findNamedRange(nested);
+        if (found !== undefined) return found;
+      }
+    }
+    return undefined;
+  };
+  const nested = findNamedRange(value);
+  if (nested !== undefined) return nested;
   return value;
 }
 
@@ -1519,29 +1544,46 @@ function parseVehicleState(raw: JsonValue): VehicleStateSummary {
 }
 
 const DOOR_ALIASES: Record<string, string> = {
-  frontleft: "front_left", fl: "front_left", driverfront: "front_left", leftfront: "front_left",
-  frontright: "front_right", fr: "front_right", passengerfront: "front_right", rightfront: "front_right",
-  rearleft: "rear_left", rl: "rear_left", leftrear: "rear_left", driverrear: "rear_left",
-  rearright: "rear_right", rr: "rear_right", rightrear: "rear_right", passengerrear: "rear_right",
+  frontleft: "front_left", doorfrontleft: "front_left", fl: "front_left", driverfront: "front_left", leftfront: "front_left",
+  frontright: "front_right", doorfrontright: "front_right", fr: "front_right", passengerfront: "front_right", rightfront: "front_right",
+  rearleft: "rear_left", doorrearleft: "rear_left", rl: "rear_left", leftrear: "rear_left", driverrear: "rear_left",
+  rearright: "rear_right", doorrearright: "rear_right", rr: "rear_right", rightrear: "rear_right", passengerrear: "rear_right",
   hood: "hood", bonnet: "hood", frunk: "hood",
-  trunk: "trunk", tailgate: "trunk", boot: "trunk", liftgate: "trunk", hatch: "trunk",
+  doorhood: "hood", trunk: "trunk", doortrunk: "trunk", tailgate: "trunk", boot: "trunk", liftgate: "trunk", hatch: "trunk",
 };
 
 function norm(text: JsonValue | undefined): string {
   return String(text ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function nestedEntryText(value: JsonValue | undefined): string {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const key of ["displayMessage", "name", "id", "value"]) {
+      const nested = value[key];
+      if (typeof nested === "string" || typeof nested === "number") return String(nested);
+    }
+  }
+  return "";
+}
+
 function entryName(entry: Record<string, JsonValue>): string {
   for (const k of ["location", "position", "doorLocation", "name", "door", "type", "id", "lightLocation", "light"]) {
-    const v = entry[k];
-    if (typeof v === "string") return v;
+    const text = nestedEntryText(entry[k]);
+    if (text) return text;
   }
   return "";
 }
 
 function entryState(entry: Record<string, JsonValue>): JsonValue | undefined {
   for (const k of ["status", "state", "doorStatus", "lightStatus", "open", "on", "value"]) {
-    if (k in entry) return entry[k];
+    if (!(k in entry)) continue;
+    const value = entry[k];
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      if ("value" in value) return value.value;
+      if ("displayMessage" in value) return value.displayMessage;
+    }
+    return value;
   }
   return undefined;
 }
@@ -1590,6 +1632,77 @@ function parseHeadlights(state: JsonValue): string | null {
   return on === null ? null : on ? "on" : "off";
 }
 
+type WarningKey = "brake" | "engine_oil" | "tire_pressure" | "mil" | "abs" | "airbag";
+
+/**
+ * Vehicle-health reports contain named diagnostics rather than one universal
+ * warning bit. Only a literal `warning: true` is surfaced: an unfamiliar
+ * diagnostic stays absent instead of being guessed as a fault.
+ */
+function parseWarnings(health: JsonValue): Record<WarningKey, boolean> {
+  const warnings = {} as Record<WarningKey, boolean>;
+  const diagnostic = findKey(health, "diagnostic");
+  if (diagnostic === undefined || diagnostic === null || typeof diagnostic !== "object" || Array.isArray(diagnostic)) {
+    return warnings;
+  }
+  const fields: Array<[WarningKey, string[]]> = [
+    ["brake", ["brakeWarn", "breakWarn", "brakeStatus"]],
+    ["engine_oil", ["engineOilWarn", "engineOilStatus"]],
+    ["tire_pressure", ["tireStatus", "tirePressureStatus"]],
+    ["mil", ["milStatus", "milOnStatus"]],
+    ["abs", ["absStatus"]],
+    ["airbag", ["airbagStatus"]],
+  ];
+  for (const [key, aliases] of fields) {
+    let entry: JsonValue | undefined;
+    for (const alias of aliases) {
+      if (alias in diagnostic) {
+        entry = diagnostic[alias];
+        break;
+      }
+    }
+    if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && "warning" in entry) {
+      const warning = toBool(entry.warning);
+      if (warning !== null) warnings[key] = warning;
+    }
+  }
+  return warnings;
+}
+
+const TIRE_ALIASES: Record<string, string> = {
+  tirefrontleft: "front_left", frontleft: "front_left", fl: "front_left",
+  tirefrontright: "front_right", frontright: "front_right", fr: "front_right",
+  tirerearleft: "rear_left", rearleft: "rear_left", rl: "rear_left",
+  tirerearright: "rear_right", rearright: "rear_right", rr: "rear_right",
+};
+
+/**
+ * The current health feed reports raw pressures in kPa-scale values (for
+ * example 240.0). Convert only that unambiguous 100..1000 range to bar. A
+ * response in an unknown unit stays absent rather than displaying a false
+ * pressure reading.
+ */
+function parseTirePressureBar(health: JsonValue): Record<string, number> {
+  const tireStatus = findKey(health, "tireStatus");
+  if (tireStatus === null || typeof tireStatus !== "object" || Array.isArray(tireStatus)) return {};
+  const tires = tireStatus.tires;
+  if (!Array.isArray(tires)) return {};
+  const out: Record<string, number> = {};
+  for (const tire of tires) {
+    if (tire === null || typeof tire !== "object" || Array.isArray(tire)) continue;
+    const position = TIRE_ALIASES[norm(nestedEntryText(tire.position))];
+    const rawPressure = toFloat(tire.pressureValue);
+    if (!position || rawPressure === null || rawPressure < 100 || rawPressure > 1000) continue;
+    out[position] = Math.round((rawPressure / 100) * 10) / 10;
+  }
+  return out;
+}
+
+function parseBatteryHealth(health: JsonValue): number | null {
+  const value = toInt(firstPresent(health, ["batteryLife", "batteryHealth"]));
+  return value !== null && value >= 0 && value <= 100 ? value : null;
+}
+
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
 async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
   const headers = sharedHeaders(`Bearer ${accessToken}`);
@@ -1603,11 +1716,14 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
   const health = stateRes.ok && healthRes.ok ? ((await healthRes.json()) as JsonValue) : null;
 
   const charging = (findKey(state, "chargingControl") ?? state) as JsonValue;
-  const battery = toInt(firstPresent(charging, ["hvBatteryLife"]));
+  const battery = toInt(firstPresent(charging, ["hvBatteryLife", "batteryLife"]));
   const gasRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeFirst"])));
   const evRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeSecond"])));
   let totalRange = toInt(firstPresent(charging, ["cruisingRangeCombined"]));
   if (totalRange === null && (evRange !== null || gasRange !== null)) totalRange = (evRange ?? 0) + (gasRange ?? 0);
+
+  const tirePressureBar = health ? parseTirePressureBar(health) : {};
+  const warnings = health ? parseWarnings(health) : {};
 
   return {
     ts: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
@@ -1616,9 +1732,13 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
     gas_range_km: gasRange,
     total_range_km: totalRange,
     odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])),
-    charging_status: chargingStatus(firstPresent(charging, ["hvChargingStatus"])),
-    plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus"])),
+    charging_status: chargingStatus(firstPresent(charging, ["hvChargingStatus", "chargingStatus"])),
+    plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus", "chargePlugConnected"])),
     time_to_full_charge_min: toInt(firstPresent(charging, ["hvTimeToFullCharge"])),
+    health_reported: health !== null,
+    battery_health_pct: health ? parseBatteryHealth(health) : null,
+    tire_pressure_bar: tirePressureBar,
+    warnings,
     ignition_on: toBool(firstPresent(state, ["ignitionStatus", "ignition", "ignitionState"])),
     speed_kmh: toInt(firstPresent(state, ["speed", "vehicleSpeed", "spd"])),
     location: {

@@ -8,13 +8,13 @@
 
   var charts = { battery: null, odometer: null, daily: null, monthly: null };
 
-  // Graphite + teal palette (matches :root in styles.css). No blue, and no
-  // ember here — ember (--heat) is reserved for cabin-heating controls only.
+  // The chart palette matches the dashboard's single blue information accent.
+  // Warm tones stay reserved for climate and red stays reserved for alerts.
   var COLORS = {
-    accent: "#4fd1b0",   // --accent (teal)
-    accent2: "#8ce8d0",  // --accent-soft (lighter teal, for the second series)
-    grid: "rgba(232,226,214,0.08)", // neutral graphite (matches --border)
-    text: "#a8a49b"      // --text-mid
+    accent: "#79adfa",
+    accent2: "#a6c9ff",
+    grid: "rgba(235,241,250,0.08)",
+    text: "#939dab"
   };
 
   function ready() { return typeof window.Chart !== "undefined"; }
@@ -74,7 +74,7 @@
           label: "Battery %",
           data: data,
           borderColor: COLORS.accent,
-          backgroundColor: "rgba(79,209,176,0.15)",
+          backgroundColor: "rgba(121,173,250,0.15)",
           fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -103,7 +103,7 @@
           label: "Odometer (km)",
           data: data,
           borderColor: COLORS.accent2,
-          backgroundColor: "rgba(140,232,208,0.12)",
+          backgroundColor: "rgba(166,201,255,0.12)",
           fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2
         }]
       },
@@ -129,7 +129,7 @@
       return (o && typeof o === "object" && o.distance_km != null) ? o.distance_km : null;
     });
     var colors = days.map(function (d) {
-      return d.partial ? "rgba(140,232,208,0.2)" : "rgba(140,232,208,0.45)";
+      return d.partial ? "rgba(166,201,255,0.2)" : "rgba(166,201,255,0.45)";
     });
     charts.daily = new Chart(canvas.getContext("2d"), {
       type: "bar",
@@ -177,7 +177,7 @@
         datasets: [{
           label: "Distance (" + unit + ")",
           data: series,
-          backgroundColor: "rgba(79,209,176,0.5)",
+          backgroundColor: "rgba(121,173,250,0.5)",
           borderColor: COLORS.accent,
           borderWidth: 1, borderRadius: 4
         }]

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0a0a0b" />
-  <title>PHEV Dashboard</title>
+  <meta name="theme-color" content="#090a0d" />
+  <title>Outlander PHEV</title>
 
   <!-- Add to Home Screen -> standalone app (no Safari chrome), proper icon +
        title, instead of a plain bookmark. iOS reads the apple-* tags directly;
@@ -13,10 +13,8 @@
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="PHEV" />
+  <meta name="apple-mobile-web-app-title" content="Outlander" />
 
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="styles.css" />
 
   <!-- Tiny pub/sub bootstrap so crypto.js can hand the decrypted data to every
@@ -123,7 +121,7 @@
       </symbol>
 
       <!-- Seat heater, side profile: backrest + cushion + a rising heat wave.
-           Turns ember when that zone is on. -->
+           Uses the warm comfort colour only when that zone is on. -->
       <symbol id="icon-seat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M8.4 3.5h3.3a2.2 2.2 0 0 1 2.2 2.2v8.8H8.4a2.2 2.2 0 0 1-2.2-2.2V5.7a2.2 2.2 0 0 1 2.2-2.2z" />
         <path d="M5.4 16.4h9.9a2.3 2.3 0 0 1 2.3 2.3v1.8" />
@@ -225,7 +223,7 @@
   <div id="lock-overlay" class="lock-overlay" aria-hidden="false">
     <div class="lock-card">
       <svg class="lock-logo" aria-hidden="true"><use href="#icon-bolt" /></svg>
-      <h1>PHEV Dashboard</h1>
+      <h1>Outlander PHEV</h1>
       <p id="lock-sub" class="lock-sub">Enter your dashboard passphrase</p>
 
       <!-- Shown instead of the passphrase form when Face ID lock is turned on
@@ -352,14 +350,14 @@
     <!-- =============== STATUS TAB =============== -->
     <div class="tab-view is-active" id="tab-status" data-tab="status" role="tabpanel" aria-label="Status">
 
-      <!-- This is deliberately a data view, not a decorative 3D model. The
-           highlighted parts correspond to the last vehicle report, while a
-           separate command receipt says whether an operation was confirmed. -->
+      <!-- A single quiet glance card. The car layer is data-led: access,
+           lights and charge only react to a vehicle report; climate/command
+           motion waits for a confirmed operation receipt. -->
       <section class="vehicle-hero is-waiting" id="vehicle-hero" aria-labelledby="vehicle-card-title">
         <div class="vehicle-hero-top">
           <div>
-            <p class="section-kicker">Latest vehicle report</p>
-            <h2 id="vehicle-card-title">Vehicle at a glance</h2>
+            <p class="section-kicker">Your Outlander</p>
+            <h2 id="vehicle-card-title">Ready when you are</h2>
           </div>
           <span class="vehicle-live-state" id="vehicle-live-state">Waiting for report</span>
         </div>
@@ -367,12 +365,7 @@
         <div class="vehicle-stage" role="img" aria-labelledby="vehicle-visual-title vehicle-visual-desc">
           <span class="vehicle-visual-title" id="vehicle-visual-title">Live vehicle visual</span>
           <p class="sr-only" id="vehicle-visual-desc">Waiting for the most recent vehicle report.</p>
-          <div class="vehicle-side-profile" aria-hidden="true">
-            <img src="assets/vehicle/dge-side.png" alt="" />
-          </div>
           <div class="digital-twin" id="digital-twin" aria-hidden="true">
-            <span class="twin-radar twin-radar--one"></span>
-            <span class="twin-radar twin-radar--two"></span>
             <span class="twin-ground-shadow"></span>
             <span class="twin-command-ring"></span>
             <span class="twin-locate-ping"></span>
@@ -397,6 +390,7 @@
           <div class="vehicle-access-glyph" id="vehicle-access-glyph" hidden aria-hidden="true">
             <img id="door-state-glyph" src="assets/vehicle/doors_all_closed.png" alt="" />
           </div>
+          <span class="vehicle-open-detail" id="vehicle-open-detail" hidden></span>
         </div>
 
         <div class="vehicle-signals" aria-live="polite">
@@ -405,49 +399,68 @@
           <div class="vehicle-signal" id="vehicle-charge-signal"><span>Charge</span><strong id="vehicle-charge-state">Checking</strong></div>
           <div class="vehicle-signal" id="vehicle-climate-signal"><span>Climate</span><strong id="vehicle-climate-state">Off</strong></div>
         </div>
-        <p class="vehicle-hero-note">Body, access and charge indicators use the last vehicle report. Climate and command motion only appear after a confirmed operation receipt.</p>
+        <p class="vehicle-hero-note">The visual never invents vehicle state. It only reflects the latest report or a confirmed remote action.</p>
       </section>
 
-    <!-- Stat tiles -->
-    <section class="tiles" id="tiles">
-      <div class="tile" id="tile-battery">
-        <span class="tile-label">Battery</span>
-        <span class="tile-value skeleton" data-field="battery">—</span>
-        <div class="battery-bar"><div class="battery-fill" id="battery-fill"></div></div>
-      </div>
-      <div class="tile"><span class="tile-label">EV range</span><span class="tile-value skeleton" data-field="ev_range">—</span></div>
-      <div class="tile"><span class="tile-label">Gas range</span><span class="tile-value skeleton" data-field="gas_range">—</span></div>
-      <div class="tile"><span class="tile-label">Total range</span><span class="tile-value skeleton" data-field="total_range">—</span></div>
-      <div class="tile"><span class="tile-label">Odometer</span><span class="tile-value skeleton" data-field="odometer">—</span></div>
-      <div class="tile"><span class="tile-label">Charging</span><span class="tile-value skeleton" data-field="charging">—</span></div>
-      <div class="tile"><span class="tile-label">Plugged in</span><span class="tile-value skeleton" data-field="plugged">—</span></div>
-      <div class="tile"><span class="tile-label">Time to full</span><span class="tile-value skeleton" data-field="ttf">—</span></div>
-    </section>
+      <section class="primary-metrics" id="tiles" aria-label="Energy and range">
+        <div class="metric metric--battery" id="tile-battery">
+          <span class="metric-label">Battery</span>
+          <span class="metric-value skeleton" data-field="battery">—</span>
+          <div class="battery-bar"><div class="battery-fill" id="battery-fill"></div></div>
+        </div>
+        <div class="metric"><span class="metric-label">Electric range</span><span class="metric-value skeleton" data-field="ev_range">—</span></div>
+        <div class="metric"><span class="metric-label">Total range</span><span class="metric-value skeleton" data-field="total_range">—</span></div>
+        <div class="metric"><span class="metric-label">Charging</span><span class="metric-value skeleton" data-field="charging">—</span></div>
+      </section>
 
-    <!-- Warnings (hidden unless something is actually wrong) -->
-    <section class="panel panel-warn" id="warnings-panel" hidden>
-      <h2 class="panel-title">Active warnings</h2>
-      <div class="warnings" id="warnings"></div>
-    </section>
+      <section class="overview-row" aria-label="Vehicle health and location">
+        <article class="overview-card" id="vehicle-health-panel">
+          <span class="overview-label">Vehicle health</span>
+          <strong id="vehicle-health-summary">Waiting for report</strong>
+          <span class="overview-detail">Battery condition <b id="vehicle-health-battery">—</b></span>
+        </article>
+        <article class="overview-card location-card" id="location-panel" hidden>
+          <span class="overview-label">Vehicle location</span>
+          <strong id="location-coordinates">—</strong>
+          <span class="overview-detail" id="location-availability">Not reported</span>
+          <a class="text-link" id="location-open" href="#" target="_blank" rel="noopener">Open in Maps</a>
+        </article>
+      </section>
+
+      <!-- Only shown when this specific health response marks a condition. -->
+      <section class="alert-card" id="warnings-panel" hidden>
+        <span class="overview-label">Needs attention</span>
+        <div class="warnings" id="warnings"></div>
+      </section>
+
+      <details class="overview-disclosure">
+        <summary>More vehicle details</summary>
+        <div class="secondary-metrics">
+          <div><span>Gas range</span><strong class="skeleton" data-field="gas_range">—</strong></div>
+          <div><span>Plugged in</span><strong class="skeleton" data-field="plugged">—</strong></div>
+          <div><span>Time to full</span><strong class="skeleton" data-field="ttf">—</strong></div>
+          <div><span>Odometer</span><strong class="skeleton" data-field="odometer">—</strong></div>
+        </div>
+      </details>
 
     <!-- Driving score: rides inside the same VHR response as tire pressure,
          not a separate call. Hidden unless the account has any recent
          driving history to score. -->
-    <section class="panel" id="driving-score-panel" hidden>
+    <section class="compact-panel" id="driving-score-panel" hidden>
       <h2 class="panel-title">Driving score</h2>
-      <div class="tiles">
-        <div class="tile"><span class="tile-label">Overall</span><span class="tile-value" data-field="ds_overall">—</span></div>
-        <div class="tile"><span class="tile-label">Acceleration</span><span class="tile-value" data-field="ds_accel">—</span></div>
-        <div class="tile"><span class="tile-label">Steering</span><span class="tile-value" data-field="ds_steer">—</span></div>
-        <div class="tile"><span class="tile-label">Braking</span><span class="tile-value" data-field="ds_brake">—</span></div>
-        <div class="tile"><span class="tile-label">Fuel economy</span><span class="tile-value" data-field="ds_fuel">—</span></div>
+      <div class="score-grid">
+        <div><span>Overall</span><strong data-field="ds_overall">—</strong></div>
+        <div><span>Acceleration</span><strong data-field="ds_accel">—</strong></div>
+        <div><span>Steering</span><strong data-field="ds_steer">—</strong></div>
+        <div><span>Braking</span><strong data-field="ds_brake">—</strong></div>
+        <div><span>Fuel economy</span><strong data-field="ds_fuel">—</strong></div>
       </div>
     </section>
 
     <!-- Vehicle flags: live-only (GET /state), not part of the hourly
          snapshot -- populated after the first live refresh, not on initial
          cached-data paint. -->
-    <section class="panel" id="flags-panel" hidden>
+    <section class="compact-panel" id="flags-panel" hidden>
       <h2 class="panel-title">Vehicle flags</h2>
       <div class="flags" id="flags"></div>
     </section>
@@ -494,8 +507,21 @@
         <button type="button" class="climate-preset climate-preset--clear" data-preset="clear_windshield">Clear windshield</button>
         <button type="button" class="climate-preset" data-preset="rear_glass">Rear glass</button>
       </div>
-      <p class="climate-preset-hint">Clear windshield selects max defrost and front defrost. Press Start climate to send it.</p>
+      <p class="climate-preset-hint">Choose a preset or set the cabin yourself.</p>
 
+      <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
+        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
+        <span class="climate-master-label">Start climate</span>
+      </button>
+      <!-- Hidden until a climate start is confirmed running. -->
+      <button type="button" class="climate-stop" id="climate-stop" hidden aria-label="Stop the running climate session">
+        <svg aria-hidden="true"><use href="#icon-stop" /></svg>
+        Stop climate
+      </button>
+
+      <details class="climate-options">
+        <summary>Comfort options</summary>
+        <p>Select equipment before starting climate. Availability comes from the vehicle.</p>
       <!-- Seat heaters, laid out where the seats actually are. Tap = arm (local). -->
       <div class="seat-diagram" role="group" aria-label="Seat heaters">
         <svg class="seat-cabin" viewBox="0 0 300 210" aria-hidden="true">
@@ -554,46 +580,41 @@
         <summary id="service-discovery-summary">API-reported services</summary>
         <div class="vehicle-support-chips" id="service-discovery-chips"></div>
       </details>
-
-      <button type="button" class="climate-master" id="climate-start" aria-label="Start climate with the selected options">
-        <svg aria-hidden="true"><use href="#icon-fan" /></svg>
-        <span class="climate-master-label">Start climate</span>
-      </button>
-      <!-- Hidden until a climate start is confirmed running (app.js toggles the
-           `hidden` attribute) — stopping is operation "engineOff", a fully
-           separate request from starting, not a re-send with everything off. -->
-      <button type="button" class="climate-stop" id="climate-stop" hidden aria-label="Stop the running climate session">
-        <svg aria-hidden="true"><use href="#icon-stop" /></svg>
-        Stop climate
-      </button>
+      </details>
     </section>
     </div>
 
     <!-- =============== CONTROLS TAB =============== -->
     <div class="tab-view" id="tab-controls" data-tab="controls" role="tabpanel" aria-label="Controls">
 
-    <!-- Controls come first: the operation result below distinguishes a
-         vehicle-confirmed command from one merely accepted by the API. -->
-    <section class="panel panel-commands">
+    <!-- A short, ordered control surface. Each result is only called confirmed
+         after the vehicle operation reaches its terminal response. -->
+    <section class="control-panel panel-commands">
       <h2 class="panel-title">
         <svg class="pt-icon" aria-hidden="true"><use href="#icon-lock" /></svg>
-        Remote commands
+        Remote control
       </h2>
-      <p class="panel-intro">Send one command at a time. The result is confirmed only after the vehicle responds.</p>
+      <p class="panel-intro">Commands wait for the vehicle before they claim success.</p>
       <div class="commands" id="commands">
-        <button class="cmd-btn" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Lock</span></button>
-        <button class="cmd-btn cmd-btn--caution" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg><span>Unlock</span></button>
-        <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg><span>Horn</span></button>
-        <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span>Flash lights</span></button>
-        <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg><span>Locate</span></button>
-        <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg><span>Start charge</span></button>
-        <button class="cmd-btn cmd-btn--stop" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg><span>Stop charge</span></button>
+        <div class="command-group">
+          <button class="cmd-btn cmd-btn--primary" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Lock</span></button>
+          <button class="cmd-btn cmd-btn--caution" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg><span>Unlock</span></button>
+        </div>
+        <div class="command-group">
+          <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg><span>Find vehicle</span></button>
+          <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span>Flash lights</span></button>
+          <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg><span>Horn</span></button>
+        </div>
+        <div class="command-group command-group--charge">
+          <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg><span>Start charge</span></button>
+          <button class="cmd-btn cmd-btn--stop" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg><span>Stop charge</span></button>
+        </div>
       </div>
       <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
     </section>
 
     <!-- Doors & lights -->
-    <section class="panel">
+    <section class="compact-panel access-panel">
       <h2 class="panel-title">
         <svg class="pt-icon" aria-hidden="true"><use href="#icon-door" /></svg>
         Doors &amp; lights
@@ -610,7 +631,7 @@
     </section>
 
     <!-- Tire pressure -->
-    <section class="panel">
+    <section class="compact-panel tire-panel">
       <h2 class="panel-title">
         <svg class="pt-icon" aria-hidden="true"><use href="#icon-tire" /></svg>
         Tire pressure <span class="panel-unit">(bar)</span>
@@ -627,11 +648,9 @@
          holds exactly 3 timer slots, so this always shows 3, not an "add
          timer" list. An unchecked timer is saved disabled, not omitted.
          Loaded from the vehicle on tab load; nothing is sent until Save. -->
-    <section class="panel" id="charging-schedule-panel">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-bolt" /></svg>
-        Charging schedule
-      </h2>
+    <details class="scheduler-panel" id="charging-schedule-panel">
+      <summary><span>Charging schedule</span><span>Manage</span></summary>
+      <div class="scheduler-content">
       <p class="schedule-hint" id="schedule-status">Loading current schedule…</p>
 
       <div class="charge-timer" data-timer="0">
@@ -704,17 +723,16 @@
         <svg aria-hidden="true"><use href="#icon-bolt" /></svg>
         <span>Save schedule</span>
       </button>
-    </section>
+      </div>
+    </details>
 
     <!-- Climate scheduling is a vehicle-side recurring pre-conditioning timer.
          The app creates exactly three slots. The editor is built only after
          the Worker reads those slots, so it can preserve each vehicle-reported
          target temperature and HVAC setting rather than guessing fields. -->
-    <section class="panel" id="climate-schedule-panel" aria-describedby="climate-schedule-status climate-schedule-note">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-fan" /></svg>
-        Climate schedule
-      </h2>
+    <details class="scheduler-panel" id="climate-schedule-panel" aria-describedby="climate-schedule-status climate-schedule-note">
+      <summary><span>Climate schedule</span><span>Manage</span></summary>
+      <div class="scheduler-content">
       <p class="schedule-hint" id="climate-schedule-status">Unlock to load the vehicle schedule.</p>
       <p class="schedule-guard" id="climate-schedule-note">
         “Ready by” is a departure time. Saved cabin target and climate options stay unchanged. At run time, the vehicle must be parked, off, in Park, and closed/locked.
@@ -724,29 +742,30 @@
         <svg aria-hidden="true"><use href="#icon-fan" /></svg>
         <span>Save climate schedule</span>
       </button>
-    </section>
+      </div>
+    </details>
     </div>
 
     <!-- =============== HISTORY TAB =============== -->
     <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="History">
 
     <!-- Charts -->
-    <section class="panel">
+    <section class="history-card">
       <h2 class="panel-title">Battery history</h2>
       <div class="chart-wrap"><canvas id="chart-battery"></canvas></div>
       <p class="chart-empty" id="empty-battery" hidden>No history yet.</p>
     </section>
-    <section class="panel">
+    <section class="history-card">
       <h2 class="panel-title">Odometer history</h2>
       <div class="chart-wrap"><canvas id="chart-odometer"></canvas></div>
       <p class="chart-empty" id="empty-odometer" hidden>No history yet.</p>
     </section>
-    <section class="panel">
+    <section class="history-card">
       <h2 class="panel-title">Daily distance</h2>
       <div class="chart-wrap"><canvas id="chart-daily"></canvas></div>
       <p class="chart-empty" id="empty-daily" hidden>No history yet.</p>
     </section>
-    <section class="panel">
+    <section class="history-card">
       <h2 class="panel-title">Monthly distance</h2>
       <div class="chart-wrap"><canvas id="chart-monthly"></canvas></div>
       <p class="chart-empty" id="empty-monthly" hidden>No history yet.</p>
@@ -758,7 +777,7 @@
   <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
     <button type="button" class="tab-btn active" data-tab="status" role="tab" aria-selected="true" aria-controls="tab-status">
       <svg aria-hidden="true"><use href="#icon-gauge" /></svg>
-      <span>Status</span>
+      <span>Home</span>
     </button>
     <button type="button" class="tab-btn" data-tab="climate" role="tab" aria-selected="false" aria-controls="tab-climate">
       <svg aria-hidden="true"><use href="#icon-fan" /></svg>
@@ -766,11 +785,11 @@
     </button>
     <button type="button" class="tab-btn" data-tab="controls" role="tab" aria-selected="false" aria-controls="tab-controls">
       <svg aria-hidden="true"><use href="#icon-lock" /></svg>
-      <span>Controls</span>
+      <span>Vehicle</span>
     </button>
     <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history">
       <svg aria-hidden="true"><use href="#icon-chart" /></svg>
-      <span>History</span>
+      <span>Trends</span>
     </button>
   </nav>
 

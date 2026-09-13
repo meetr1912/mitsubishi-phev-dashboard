@@ -52,6 +52,7 @@
 
   // ---- render header + tiles ----
   var lastData = null;
+  var vehicleState = {};
   var ALL_DOOR_KEYS = ["front_left", "front_right", "rear_left", "rear_right", "hood", "trunk"];
   function render(data) {
     if (!data) return;
@@ -91,6 +92,7 @@
     setField("charging", chargingLabel(l.charging_status));
     setField("plugged", l.plugged_in == null ? "—" : (l.plugged_in ? "Yes" : "No"));
     setField("ttf", ttfStr(l.time_to_full_charge_min, l.charging_status));
+    setField("battery_health", l.battery_health_pct != null ? l.battery_health_pct + "%" : "—");
 
     // doors + lights
     var doors = l.doors && typeof l.doors === "object" ? l.doors : {};
@@ -102,6 +104,8 @@
     // tire pressure + active warnings + driving score
     renderTires(l.tire_pressure_bar);
     renderWarnings(l.warnings);
+    renderHealthSummary(l);
+    renderLocation(l.location);
     renderDrivingScore(l.driving_score);
 
     // First paint after unlock renders the cached snapshot; immediately pull one
@@ -245,12 +249,19 @@
     var hasReport = Object.keys(latest).length > 0;
     var doors = latest.doors && typeof latest.doors === "object" ? latest.doors : null;
     var doorsReported = !!doors && Object.keys(doors).length > 0;
-    var openDoors = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); }) : [];
+    var openAccess = doorsReported ? ALL_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); }) : [];
+    var openBody = openAccess.filter(function (key) { return key === "hood" || key === "trunk"; });
     var reportedAccessCount = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isKnown(doors[key]); }).length : 0;
     var allAccessReported = reportedAccessCount === VEHICLE_DOOR_KEYS.length;
-    var accessText = !doorsReported ? "Not reported" : openDoors.length ? openDoors.length + " open" : reportedAccessCount === VEHICLE_DOOR_KEYS.length ? "All closed" : reportedAccessCount + " reported";
-    var accessState = !doorsReported ? "" : (openDoors.length ? "is-alert" : "is-reported");
+    var accessText = !doorsReported ? "Not reported" : openAccess.length ? openAccess.length + " open" : reportedAccessCount === VEHICLE_DOOR_KEYS.length ? "All closed" : reportedAccessCount + " reported";
+    var accessState = !doorsReported ? "" : (openAccess.length ? "is-alert" : "is-reported");
     setVehicleSignal("vehicle-access-signal", accessText, accessState);
+
+    var openDetail = document.getElementById("vehicle-open-detail");
+    if (openDetail) {
+      openDetail.hidden = openBody.length === 0;
+      openDetail.textContent = openBody.map(function (key) { return key === "hood" ? "Hood open" : "Liftgate open"; }).join(" · ");
+    }
 
     document.querySelectorAll("[data-vehicle-door]").forEach(function (door) {
       var key = door.dataset.vehicleDoor;
@@ -288,8 +299,8 @@
       stateText = "Report received";
       stateClass = "is-reported";
       description = "Last vehicle report received.";
-      if (openDoors.length) {
-        stateText = openDoors.length + " access point" + (openDoors.length === 1 ? "" : "s") + " open";
+      if (openAccess.length) {
+        stateText = openAccess.length + " access point" + (openAccess.length === 1 ? "" : "s") + " open";
         stateClass = "is-alert";
         description = "Last vehicle report shows " + stateText + ".";
       } else if (isCharging) {
@@ -298,7 +309,7 @@
         description = "Last vehicle report shows the vehicle charging.";
       }
     }
-    hero.classList.toggle("has-open-access", openDoors.length > 0);
+    hero.classList.toggle("has-open-access", openAccess.length > 0);
     hero.classList.toggle("is-climate-running", vehicleClimate.running);
     setVehicleSignal(
       "vehicle-climate-signal",
@@ -352,6 +363,63 @@
     panel.hidden = false;
   }
 
+  function activeWarningCount(warnings) {
+    warnings = warnings || {};
+    return WARNING_DEFS.filter(function (d) { return warnings[d.key] === true; }).length;
+  }
+
+  // A health result is only affirmative when the vehicle returned its health
+  // report. Missing data never becomes a reassuring "all good" message.
+  function renderHealthSummary(latest) {
+    latest = latest || {};
+    var summary = document.getElementById("vehicle-health-summary");
+    var battery = document.getElementById("vehicle-health-battery");
+    var panel = document.getElementById("vehicle-health-panel");
+    if (battery) battery.textContent = latest.battery_health_pct != null ? latest.battery_health_pct + "%" : "—";
+    if (!summary) return;
+    if (latest.health_reported !== true) {
+      summary.textContent = "Health report not available";
+      if (panel) panel.classList.remove("has-alert");
+      return;
+    }
+    var count = activeWarningCount(latest.warnings);
+    summary.textContent = count ? count + " reported warning" + (count === 1 ? "" : "s") : "No reported warnings";
+    if (panel) panel.classList.toggle("has-alert", count > 0);
+  }
+
+  function validCoordinate(value, min, max) {
+    var n = Number(value);
+    return isFinite(n) && n >= min && n <= max;
+  }
+
+  // This is the vehicle's own last reported position. It is never requested
+  // from a mapping service; the external map is opened only after a user tap.
+  function renderLocation(location) {
+    var panel = document.getElementById("location-panel");
+    var label = document.getElementById("location-coordinates");
+    var note = document.getElementById("location-availability");
+    var link = document.getElementById("location-open");
+    if (!panel || !label || !note || !link) return;
+    var lat = location && location.lat;
+    var lon = location && location.lon;
+    var known = validCoordinate(lat, -90, 90) && validCoordinate(lon, -180, 180);
+    var privacyEnabled = vehicleState && vehicleState.privacyModeEnabled === true;
+    panel.hidden = !known && !privacyEnabled;
+    if (privacyEnabled) {
+      label.textContent = "Location sharing paused";
+      note.textContent = "Privacy mode is reported on.";
+      link.hidden = true;
+      return;
+    }
+    if (!known) return;
+    var latitude = Number(lat);
+    var longitude = Number(lon);
+    label.textContent = latitude.toFixed(5) + ", " + longitude.toFixed(5);
+    note.textContent = "Last reported vehicle position";
+    link.hidden = false;
+    link.href = "https://maps.apple.com/?ll=" + encodeURIComponent(latitude.toFixed(6) + "," + longitude.toFixed(6));
+  }
+
   // ---- driving score (panel hidden unless the account has any score to show) ----
   // [UNVERIFIED] field locations are inferred from decompiled classes on the
   // worker side (see index.ts parseDrivingScore) -- expect "—" until
@@ -388,6 +456,7 @@
     var container = document.getElementById("flags");
     if (!panel || !container) return;
     flags = flags || {};
+    vehicleState = flags;
     container.innerHTML = "";
     var shown = 0;
     FLAG_DEFS.forEach(function (def) {
@@ -401,6 +470,19 @@
       container.appendChild(chip);
     });
     panel.hidden = shown === 0;
+    if (lastData && lastData.latest) renderLocation(lastData.latest.location);
+
+    // Locate requires vehicle location services. When privacy mode is
+    // explicitly reported on, keep the control visibly unavailable instead of
+    // sending a command the vehicle will reject. Unknown remains available.
+    var locateBtn = document.querySelector('.cmd-btn[data-action="locate"]');
+    if (locateBtn) {
+      var locateBlocked = flags.privacyModeEnabled === true;
+      locateBtn.disabled = locateBlocked;
+      locateBtn.classList.toggle("not-available", locateBlocked);
+      if (locateBlocked) locateBtn.setAttribute("title", "Unavailable while vehicle privacy mode is on");
+      else locateBtn.removeAttribute("title");
+    }
   }
 
   function rangeStr(km) {
@@ -940,7 +1022,11 @@
     var body = {};
     try { body = await res.json(); } catch (e) { /* non-JSON */ }
     if (res.ok && body.success && body.latest) {
-      var merged = Object.assign({}, lastData || {}, { latest: body.latest });
+      // /status intentionally returns only live fields. Preserve cached
+      // history-derived fields that this endpoint does not own (for example
+      // driving score), rather than blanking the dashboard after a refresh.
+      var mergedLatest = Object.assign({}, (lastData && lastData.latest) || {}, body.latest);
+      var merged = Object.assign({}, lastData || {}, { latest: mergedLatest });
       window.PHEV.setData(merged);
       return { ok: true, body: body };
     }
