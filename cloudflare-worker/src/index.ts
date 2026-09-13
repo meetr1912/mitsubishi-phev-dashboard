@@ -1295,26 +1295,31 @@ function toInt(value: JsonValue | undefined, def: number | null = null): number 
   return f !== null ? Math.round(f) : def;
 }
 
-function toBool(value: JsonValue | undefined): boolean {
+function toBool(value: JsonValue | undefined): boolean | null {
   const v = scalar(value);
+  if (v === undefined || v === null) return null;
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
   if (typeof v === "string") {
-    return ["true", "1", "yes", "on", "open", "opened", "plugged", "pluggedin", "connected", "charging"].includes(
-      v.trim().toLowerCase(),
-    );
+    const s = v.trim().toLowerCase();
+    if (["true", "1", "yes", "on", "open", "opened", "plugged", "pluggedin", "connected", "charging"].includes(s)) return true;
+    if (["false", "0", "no", "off", "closed", "unplugged", "disconnected", "not_charging", "not charging"].includes(s)) return false;
+    const numeric = Number(s);
+    if (s !== "" && Number.isFinite(numeric)) return numeric !== 0;
   }
-  return false;
+  return null;
 }
 
-function chargingStatus(value: JsonValue | undefined): string {
+function chargingStatus(value: JsonValue | undefined): string | null {
   const v = scalar(value);
+  if (v === undefined || v === null) return null;
   if (typeof v === "boolean" || typeof v === "number") return v ? "charging" : "not_charging";
   const s = String(v ?? "").toLowerCase();
   if (["charging", "in_progress", "inprogress", "active"].some((t) => s.includes(t)) && !s.includes("not")) {
     return "charging";
   }
-  return "not_charging";
+  if (["not", "idle", "off", "complete", "stopped"].some((t) => s.includes(t))) return "not_charging";
+  return null;
 }
 
 /**
@@ -1397,17 +1402,15 @@ function entryState(entry: Record<string, JsonValue>): JsonValue | undefined {
   return undefined;
 }
 
-function openClosed(value: JsonValue | undefined): string {
+function openClosed(value: JsonValue | undefined): string | null {
   const v = scalar(value);
   if (typeof v === "string" && ["ajar", "open", "opened"].includes(v.trim().toLowerCase())) return "open";
-  return toBool(v) ? "open" : "closed";
+  const open = toBool(v);
+  return open === null ? null : open ? "open" : "closed";
 }
 
 function parseDoors(state: JsonValue): Record<string, string> {
-  const doors: Record<string, string> = {
-    front_left: "closed", front_right: "closed", rear_left: "closed", rear_right: "closed",
-    hood: "closed", trunk: "closed",
-  };
+  const doors: Record<string, string> = {};
   let doorList = firstPresent(state, ["doors"]);
   const doorStatus = findKey(state, "doorStatus");
   if (doorStatus !== undefined && typeof doorStatus === "object" && !Array.isArray(doorStatus)) {
@@ -1417,12 +1420,13 @@ function parseDoors(state: JsonValue): Record<string, string> {
   for (const entry of doorList) {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
     const canonical = DOOR_ALIASES[norm(entryName(entry))];
-    if (canonical) doors[canonical] = openClosed(entryState(entry));
+    const value = openClosed(entryState(entry));
+    if (canonical && value !== null) doors[canonical] = value;
   }
   return doors;
 }
 
-function parseHeadlights(state: JsonValue): string {
+function parseHeadlights(state: JsonValue): string | null {
   let lights: JsonValue | undefined;
   const lightStatus = findKey(state, "lightStatus");
   if (lightStatus !== undefined && typeof lightStatus === "object" && !Array.isArray(lightStatus)) {
@@ -1432,12 +1436,14 @@ function parseHeadlights(state: JsonValue): string {
   if (Array.isArray(lights)) {
     for (const entry of lights) {
       if (entry !== null && typeof entry === "object" && !Array.isArray(entry) && norm(entryName(entry)).includes("head")) {
-        return toBool(entryState(entry)) ? "on" : "off";
+        const on = toBool(entryState(entry));
+        if (on !== null) return on ? "on" : "off";
       }
     }
   }
   const flat = firstPresent(state, ["headlightStatus", "headLampStatus", "headlights"]);
-  return flat !== undefined ? (toBool(flat) ? "on" : "off") : "off";
+  const on = toBool(flat);
+  return on === null ? null : on ? "on" : "off";
 }
 
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
@@ -1461,16 +1467,16 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
 
   return {
     ts: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
-    battery_pct: battery ?? 0,
-    ev_range_km: evRange ?? 0,
-    gas_range_km: gasRange ?? 0,
-    total_range_km: totalRange ?? 0,
-    odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])) ?? 0,
+    battery_pct: battery,
+    ev_range_km: evRange,
+    gas_range_km: gasRange,
+    total_range_km: totalRange,
+    odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])),
     charging_status: chargingStatus(firstPresent(charging, ["hvChargingStatus"])),
     plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus"])),
-    time_to_full_charge_min: toInt(firstPresent(charging, ["hvTimeToFullCharge"]), 0) ?? 0,
+    time_to_full_charge_min: toInt(firstPresent(charging, ["hvTimeToFullCharge"])),
     ignition_on: toBool(firstPresent(state, ["ignitionStatus", "ignition", "ignitionState"])),
-    speed_kmh: toInt(firstPresent(state, ["speed", "vehicleSpeed", "spd"]), 0) ?? 0,
+    speed_kmh: toInt(firstPresent(state, ["speed", "vehicleSpeed", "spd"])),
     location: {
       lat: toFloat(firstPresent(state, ["lat", "latitude"])),
       lon: toFloat(firstPresent(state, ["lon", "lng", "longitude"])),

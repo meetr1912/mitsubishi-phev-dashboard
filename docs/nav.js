@@ -35,7 +35,7 @@
       if (name === "history" && window.PHEV && typeof window.PHEV.resizeCharts === "function") {
         window.PHEV.resizeCharts();
       }
-      // three-scene.js (hero) already listens for window resize; charts respond too.
+      // The status SVG is responsive through CSS; charts respond to this resize.
       window.dispatchEvent(new Event("resize"));
     });
   }

@@ -155,8 +155,8 @@ def load_or_create_salt() -> bytes:
 #
 # The live Aeris response shapes are only partially known (see README / the
 # reverse-engineering notes). Everything below is defensive: unknown fields
-# degrade to sensible defaults instead of throwing, so a single unexpected
-# key never breaks the whole run.
+# remain null or absent instead of being guessed, so a single unexpected key
+# never breaks the whole run or turns into a misleading vehicle state.
 # ---------------------------------------------------------------------------
 def _scalar(value):
     """Unwrap the common {"value": X, "unit": ...} response wrapper."""
@@ -180,18 +180,31 @@ def _to_int(value, default=None):
     return int(round(f)) if f is not None else default
 
 
-def _to_bool(value) -> bool:
+def _to_bool(value) -> bool | None:
     value = _scalar(value)
+    if value is None:
+        return None
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in (
+        text = value.strip().lower()
+        if text in (
             "true", "1", "yes", "on", "open", "opened",
             "plugged", "pluggedin", "connected", "charging",
-        )
-    return False
+        ):
+            return True
+        if text in (
+            "false", "0", "no", "off", "closed", "unplugged",
+            "disconnected", "not_charging", "not charging",
+        ):
+            return False
+        try:
+            return float(text) != 0
+        except ValueError:
+            pass
+    return None
 
 
 def _find_key(obj, target):
@@ -228,8 +241,10 @@ def _nums(values):
     return [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
 
 
-def _charging_status(value) -> str:
+def _charging_status(value) -> str | None:
     value = _scalar(value)
+    if value is None:
+        return None
     if isinstance(value, bool):
         return "charging" if value else "not_charging"
     if isinstance(value, (int, float)):
@@ -237,18 +252,22 @@ def _charging_status(value) -> str:
     s = str(value or "").lower()
     if any(t in s for t in ("charging", "in_progress", "inprogress", "active")) and "not" not in s:
         return "charging"
-    return "not_charging"
+    if any(t in s for t in ("not", "idle", "off", "complete", "stopped")):
+        return "not_charging"
+    return None
 
 
-def _on_off(value) -> str:
-    return "on" if _to_bool(value) else "off"
+def _on_off(value) -> str | None:
+    on = _to_bool(value)
+    return "on" if on is True else "off" if on is False else None
 
 
-def _open_closed(value) -> str:
+def _open_closed(value) -> str | None:
     v = _scalar(value)
     if isinstance(v, str) and v.strip().lower() in ("ajar", "open", "opened"):
         return "open"
-    return "open" if _to_bool(v) else "closed"
+    open_ = _to_bool(v)
+    return "open" if open_ is True else "closed" if open_ is False else None
 
 
 # door location string -> canonical dashboard key
@@ -285,11 +304,7 @@ def _entry_state(entry: dict):
 
 def parse_doors(state: dict) -> dict:
     """Map doorStatus.doors[] onto the six canonical door keys."""
-    doors = {
-        "front_left": "closed", "front_right": "closed",
-        "rear_left": "closed", "rear_right": "closed",
-        "hood": "closed", "trunk": "closed",
-    }
+    doors = {}
     door_list = _first_present(state, ["doors"])
     if isinstance(_find_key(state, "doorStatus"), dict):
         door_list = _find_key(_find_key(state, "doorStatus"), "doors") or door_list
@@ -299,12 +314,13 @@ def parse_doors(state: dict) -> dict:
         if not isinstance(entry, dict):
             continue
         canonical = _DOOR_ALIASES.get(_norm(_entry_name(entry)))
-        if canonical:
-            doors[canonical] = _open_closed(_entry_state(entry))
+        value = _open_closed(_entry_state(entry))
+        if canonical and value is not None:
+            doors[canonical] = value
     return doors
 
 
-def parse_headlights(state: dict) -> str:
+def parse_headlights(state: dict) -> str | None:
     lights = None
     light_status = _find_key(state, "lightStatus")
     if isinstance(light_status, dict):
@@ -314,10 +330,12 @@ def parse_headlights(state: dict) -> str:
     if isinstance(lights, list):
         for entry in lights:
             if isinstance(entry, dict) and "head" in _norm(_entry_name(entry)):
-                return _on_off(_entry_state(entry))
+                value = _on_off(_entry_state(entry))
+                if value is not None:
+                    return value
     # Fallback: a flat headlight field somewhere in the payload.
     flat = _first_present(state, ["headlightStatus", "headLampStatus", "headlights"])
-    return _on_off(flat) if flat is not None else "off"
+    return _on_off(flat)
 
 
 def _latest_vhr_diagnostic(health: dict) -> dict:
@@ -441,18 +459,18 @@ def build_latest(state: dict, health: dict, ts: str) -> dict:
 
     return {
         "ts": ts,
-        "battery_pct": battery if battery is not None else 0,
-        "ev_range_km": ev_range if ev_range is not None else 0,
-        "gas_range_km": gas_range if gas_range is not None else 0,
-        "total_range_km": total_range if total_range is not None else 0,
-        "odometer_km": odometer if odometer is not None else 0,
+        "battery_pct": battery,
+        "ev_range_km": ev_range,
+        "gas_range_km": gas_range,
+        "total_range_km": total_range,
+        "odometer_km": odometer,
         "charging_status": _charging_status(_first_present(charging, ["hvChargingStatus"])),
         "plugged_in": _to_bool(_first_present(charging, ["hvChargingPlugStatus"])),
-        "time_to_full_charge_min": _to_int(_first_present(charging, ["hvTimeToFullCharge"]), default=0),
+        "time_to_full_charge_min": _to_int(_first_present(charging, ["hvTimeToFullCharge"])),
         "ignition_on": _to_bool(_first_present(state, [
             "ignitionStatus", "ignition", "ignitionState", "engineStatus",
         ])),
-        "speed_kmh": _to_int(_first_present(state, ["speed", "vehicleSpeed", "spd"]), default=0),
+        "speed_kmh": _to_int(_first_present(state, ["speed", "vehicleSpeed", "spd"])),
         "location": {
             "lat": _to_float(_first_present(state, ["lat", "latitude"])),
             "lon": _to_float(_first_present(state, ["lon", "lng", "longitude"])),

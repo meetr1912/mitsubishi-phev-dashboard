@@ -19,16 +19,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="styles.css" />
 
-  <!-- three.js is ESM-only in modern versions; expose it via an import map so
-       three-scene.js can `import * as THREE from 'three'` with no build step. -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
-    }
-  }
-  </script>
-
   <!-- Tiny pub/sub bootstrap so crypto.js can hand the decrypted data to every
        other module regardless of load order. Consumers call PHEV.onData(cb);
        crypto.js calls PHEV.setData(obj) once decryption succeeds. -->
@@ -362,11 +352,98 @@
     <!-- =============== STATUS TAB =============== -->
     <div class="tab-view is-active" id="tab-status" data-tab="status" role="tabpanel" aria-label="Status">
 
-      <!-- 3D hero -->
-    <section class="hero">
-      <canvas id="car-canvas" aria-label="3D vehicle status visualization"></canvas>
-      <div id="car-fallback" class="car-fallback" hidden>3D view unavailable on this device.</div>
-    </section>
+      <!-- This is deliberately a data view, not a decorative 3D model. The
+           highlighted parts correspond to the last vehicle report, while a
+           separate command receipt says whether an operation was confirmed. -->
+      <section class="vehicle-hero is-waiting" id="vehicle-hero" aria-labelledby="vehicle-card-title">
+        <div class="vehicle-hero-top">
+          <div>
+            <p class="section-kicker">Latest vehicle report</p>
+            <h2 id="vehicle-card-title">Vehicle at a glance</h2>
+          </div>
+          <span class="vehicle-live-state" id="vehicle-live-state">Waiting for report</span>
+        </div>
+
+        <div class="vehicle-stage">
+          <svg class="vehicle-visual" viewBox="0 0 400 260" role="img" aria-labelledby="vehicle-visual-title vehicle-visual-desc">
+            <title id="vehicle-visual-title">Vehicle status visualization</title>
+            <desc id="vehicle-visual-desc">Waiting for the most recent vehicle report.</desc>
+            <defs>
+              <linearGradient id="vehicle-body-gradient" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0" stop-color="#aab2b8" />
+                <stop offset="1" stop-color="#4d555d" />
+              </linearGradient>
+              <linearGradient id="vehicle-glass-gradient" x1="0" x2="1" y1="0" y2="1">
+                <stop offset="0" stop-color="#bdeee8" stop-opacity=".75" />
+                <stop offset="1" stop-color="#1e2d38" stop-opacity=".96" />
+              </linearGradient>
+              <filter id="vehicle-blur" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="5" />
+              </filter>
+            </defs>
+
+            <g class="vehicle-orbits" aria-hidden="true">
+              <ellipse cx="200" cy="132" rx="162" ry="103" />
+              <ellipse cx="200" cy="132" rx="135" ry="84" />
+            </g>
+            <ellipse class="vehicle-ground-shadow" cx="200" cy="139" rx="104" ry="100" aria-hidden="true" />
+            <g class="vehicle-charge-aura" aria-hidden="true">
+              <circle cx="200" cy="130" r="108" />
+              <circle cx="200" cy="130" r="91" />
+            </g>
+
+            <g class="vehicle-car" aria-hidden="true">
+              <path class="vehicle-light-beam vehicle-light-beam-left" d="M151 38 103 3 132 66z" />
+              <path class="vehicle-light-beam vehicle-light-beam-right" d="M249 38 297 3 268 66z" />
+              <path class="vehicle-shell" d="M200 22C244 22 270 43 282 83l15 68c7 33-7 66-37 79-35 15-85 15-120 0-30-13-44-46-37-79l15-68c12-40 38-61 82-61z" />
+              <path class="vehicle-roof" d="M200 52c29 0 48 14 58 43l8 31c4 17-5 40-22 50-24 14-48 14-72 0-17-10-26-33-22-50l8-31c10-29 29-43 58-43z" />
+              <path class="vehicle-glass" d="M200 66c24 0 39 12 47 37l6 23c3 13-5 29-18 37-21 12-49 12-70 0-13-8-21-24-18-37l6-23c8-25 23-37 47-37z" />
+              <path class="vehicle-windshield" d="M157 107c9-24 23-35 43-35s34 11 43 35c-26 9-60 9-86 0z" />
+              <path class="vehicle-rear-glass" d="M161 158c22 8 56 8 78 0-6 20-20 29-39 29s-33-9-39-29z" />
+              <path class="vehicle-centerline" d="M200 60v137" />
+
+              <g class="vehicle-door-svg vehicle-door-svg--front-left" data-vehicle-door="front_left">
+                <path d="M142 96c-16 10-23 31-22 52l5 27 29-5c-6-26-6-49 5-68z" />
+              </g>
+              <g class="vehicle-door-svg vehicle-door-svg--front-right" data-vehicle-door="front_right">
+                <path d="M258 96c16 10 23 31 22 52l-5 27-29-5c6-26 6-49-5-68z" />
+              </g>
+              <g class="vehicle-door-svg vehicle-door-svg--rear-left" data-vehicle-door="rear_left">
+                <path d="M125 178l6 25c7 18 20 27 37 31l-14-52z" />
+              </g>
+              <g class="vehicle-door-svg vehicle-door-svg--rear-right" data-vehicle-door="rear_right">
+                <path d="M275 178l-6 25c-7 18-20 27-37 31l14-52z" />
+              </g>
+
+              <g class="vehicle-wheels">
+                <rect x="104" y="89" width="19" height="48" rx="9.5" />
+                <rect x="277" y="89" width="19" height="48" rx="9.5" />
+                <rect x="111" y="165" width="19" height="48" rx="9.5" />
+                <rect x="270" y="165" width="19" height="48" rx="9.5" />
+              </g>
+              <g class="vehicle-lights">
+                <path class="vehicle-headlight" d="M163 40c8-5 17-7 26-8l-11 16-19 2z" />
+                <path class="vehicle-headlight" d="M237 40c-8-5-17-7-26-8l11 16 19 2z" />
+              </g>
+              <g class="vehicle-charge-port">
+                <circle cx="278" cy="177" r="5.5" />
+                <path class="vehicle-charge-flow" d="M308 177h30m-10-10 10 10-10 10" />
+              </g>
+            </g>
+          </svg>
+          <div class="vehicle-energy" aria-label="Battery charge">
+            <strong id="vehicle-hero-battery">—</strong><span id="vehicle-hero-battery-unit" hidden>%</span>
+            <small>battery</small>
+          </div>
+        </div>
+
+        <div class="vehicle-signals" aria-live="polite">
+          <div class="vehicle-signal" id="vehicle-access-signal"><span>Access</span><strong id="vehicle-access-state">Checking</strong></div>
+          <div class="vehicle-signal" id="vehicle-lights-signal"><span>Lights</span><strong id="vehicle-lights-state">Checking</strong></div>
+          <div class="vehicle-signal" id="vehicle-charge-signal"><span>Charge</span><strong id="vehicle-charge-state">Checking</strong></div>
+        </div>
+        <p class="vehicle-hero-note">Visualizes the last vehicle report. A command is only confirmed after the vehicle operation completes.</p>
+      </section>
 
     <!-- Stat tiles -->
     <section class="tiles" id="tiles">
@@ -458,7 +535,13 @@
 
       <!-- Seat heaters, laid out where the seats actually are. Tap = arm (local). -->
       <div class="seat-diagram" role="group" aria-label="Seat heaters">
-        <div class="car-outline" aria-hidden="true"></div>
+        <svg class="seat-cabin" viewBox="0 0 300 210" aria-hidden="true">
+          <path class="seat-cabin-shell" d="M150 10c41 0 66 26 76 67l9 42c7 36-14 73-50 80-23 5-47 5-70 0-36-7-57-44-50-80l9-42c10-41 35-67 76-67z" />
+          <path class="seat-cabin-glass" d="M150 29c29 0 47 18 56 51l5 23c3 17-9 37-27 42-22 6-46 6-68 0-18-5-30-25-27-42l5-23c9-33 27-51 56-51z" />
+          <path class="seat-cabin-console" d="M150 45v119" />
+          <path class="seat-cabin-row" d="M91 109h118M84 154h132" />
+          <circle class="seat-cabin-wheel" cx="150" cy="72" r="14" />
+        </svg>
         <div class="seat-grid">
           <button type="button" class="seat-btn comfort-toggle" data-option="seat_fl" aria-pressed="false" aria-label="Front left seat heater">
             <svg aria-hidden="true"><use href="#icon-seat" /></svg>
@@ -526,6 +609,26 @@
     <!-- =============== CONTROLS TAB =============== -->
     <div class="tab-view" id="tab-controls" data-tab="controls" role="tabpanel" aria-label="Controls">
 
+    <!-- Controls come first: the operation result below distinguishes a
+         vehicle-confirmed command from one merely accepted by the API. -->
+    <section class="panel panel-commands">
+      <h2 class="panel-title">
+        <svg class="pt-icon" aria-hidden="true"><use href="#icon-lock" /></svg>
+        Remote commands
+      </h2>
+      <p class="panel-intro">Send one command at a time. The result is confirmed only after the vehicle responds.</p>
+      <div class="commands" id="commands">
+        <button class="cmd-btn" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Lock</span></button>
+        <button class="cmd-btn cmd-btn--caution" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg><span>Unlock</span></button>
+        <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg><span>Horn</span></button>
+        <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg><span>Flash lights</span></button>
+        <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg><span>Locate</span></button>
+        <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg><span>Start charge</span></button>
+        <button class="cmd-btn cmd-btn--stop" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg><span>Stop charge</span></button>
+      </div>
+      <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
+    </section>
+
     <!-- Doors & lights -->
     <section class="panel">
       <h2 class="panel-title">
@@ -555,27 +658,6 @@
         <div class="tire" data-tire="rear_left"><span class="tire-pos">Rear L</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="rear_left">—</span><span class="tire-unit">bar</span></span></div>
         <div class="tire" data-tire="rear_right"><span class="tire-pos">Rear R</span><span class="tire-read"><span class="tire-value skeleton" data-tire-field="rear_right">—</span><span class="tire-unit">bar</span></span></div>
       </div>
-    </section>
-
-    <!-- Commands -->
-    <section class="panel">
-      <h2 class="panel-title">
-        <svg class="pt-icon" aria-hidden="true"><use href="#icon-lock" /></svg>
-        Remote commands
-      </h2>
-      <div class="commands" id="commands">
-        <button class="cmd-btn" data-action="lock"><svg aria-hidden="true"><use href="#icon-lock" /></svg> Lock</button>
-        <button class="cmd-btn" data-action="unlock"><svg aria-hidden="true"><use href="#icon-unlock" /></svg> Unlock</button>
-        <button class="cmd-btn" data-action="horn"><svg aria-hidden="true"><use href="#icon-horn" /></svg> Horn</button>
-        <button class="cmd-btn" data-action="lights"><svg aria-hidden="true"><use href="#icon-lights" /></svg> Flash lights</button>
-        <button class="cmd-btn" data-action="locate"><svg aria-hidden="true"><use href="#icon-locate" /></svg> Locate</button>
-        <!-- Charging goes through a different backend endpoint than the ops
-             above (the DGE charging microservice, not /avi/v3/remoteOperation)
-             but is still one plain command from the dashboard's perspective. -->
-        <button class="cmd-btn" data-action="charge_start"><svg aria-hidden="true"><use href="#icon-bolt" /></svg> Start charge</button>
-        <button class="cmd-btn" data-action="charge_stop"><svg aria-hidden="true"><use href="#icon-bolt-off" /></svg> Stop charge</button>
-      </div>
-      <p class="command-receipt" id="command-receipt" role="status" aria-live="polite" hidden></p>
     </section>
 
     <!-- Charging schedule (operation "chargingControl2") — the vehicle always
@@ -723,7 +805,5 @@
   <script src="charts.js" defer></script>
   <script src="nav.js" defer></script>
 
-  <!-- three-scene is an ES module (imports three) -->
-  <script type="module" src="three-scene.js"></script>
 </body>
 </html>

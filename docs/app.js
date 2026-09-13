@@ -52,6 +52,7 @@
 
   // ---- render header + tiles ----
   var lastData = null;
+  var ALL_DOOR_KEYS = ["front_left", "front_right", "rear_left", "rear_right", "hood", "trunk"];
   function render(data) {
     if (!data) return;
     lastData = data;
@@ -71,6 +72,7 @@
     setText("#veh-model", modelBits || "—");
     setText("#veh-updated", "Updated " + fmtTs(l.ts || data.generated_at));
     setText("#veh-vin", data.vin ? "VIN " + data.vin : "—");
+    renderVehicleVisual(l);
 
     // tiles
     setField("battery", (l.battery_pct != null) ? l.battery_pct + "%" : "—");
@@ -91,9 +93,9 @@
     setField("ttf", ttfStr(l.time_to_full_charge_min, l.charging_status));
 
     // doors + lights
-    var doors = l.doors || {};
-    Object.keys(doors).forEach(function (k) {
-      paintDoor(k, doors[k]);
+    var doors = l.doors && typeof l.doors === "object" ? l.doors : {};
+    ALL_DOOR_KEYS.forEach(function (k) {
+      paintDoor(k, Object.prototype.hasOwnProperty.call(doors, k) ? doors[k] : null);
     });
     paintLights(l.headlights);
 
@@ -115,6 +117,90 @@
       // configured on the vehicle, so Save doesn't silently overwrite it.
       loadChargingSchedule();
     }
+  }
+
+  // ---- vehicle-at-a-glance SVG ----
+  // This visualization only reflects fields from the last vehicle report. It
+  // is intentionally separate from command outcome feedback: a remote command
+  // can be confirmed by the operation endpoint before the next status report
+  // has reached the dashboard.
+  var VEHICLE_DOOR_KEYS = ["front_left", "front_right", "rear_left", "rear_right"];
+  function isOn(value) { return value === true || value === "on" || value === "open"; }
+  function isKnown(value) { return value !== null && value !== undefined && value !== ""; }
+
+  function setVehicleSignal(id, text, state) {
+    var signal = document.getElementById(id);
+    if (!signal) return;
+    var value = signal.querySelector("strong");
+    if (value) value.textContent = text;
+    signal.className = "vehicle-signal" + (state ? " " + state : "");
+  }
+
+  function renderVehicleVisual(latest) {
+    latest = latest || {};
+    var hero = document.getElementById("vehicle-hero");
+    if (!hero) return;
+
+    var hasReport = Object.keys(latest).length > 0;
+    var doors = latest.doors && typeof latest.doors === "object" ? latest.doors : null;
+    var doorsReported = !!doors && Object.keys(doors).length > 0;
+    var openDoors = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isOn(doors[key]); }) : [];
+    var reportedAccessCount = doorsReported ? VEHICLE_DOOR_KEYS.filter(function (key) { return isKnown(doors[key]); }).length : 0;
+    var accessText = !doorsReported ? "Not reported" : openDoors.length ? openDoors.length + " open" : reportedAccessCount === VEHICLE_DOOR_KEYS.length ? "All closed" : reportedAccessCount + " reported";
+    var accessState = !doorsReported ? "" : (openDoors.length ? "is-alert" : "is-reported");
+    setVehicleSignal("vehicle-access-signal", accessText, accessState);
+
+    document.querySelectorAll("[data-vehicle-door]").forEach(function (door) {
+      var key = door.dataset.vehicleDoor;
+      var known = doorsReported && isKnown(doors[key]);
+      door.classList.toggle("is-open", known && isOn(doors[key]));
+      door.classList.toggle("is-unknown", !known);
+    });
+
+    var lightsKnown = isKnown(latest.headlights);
+    var lightsOn = lightsKnown && isOn(latest.headlights);
+    hero.classList.toggle("lights-on", lightsOn);
+    setVehicleSignal("vehicle-lights-signal", !lightsKnown ? "Not reported" : (lightsOn ? "On" : "Off"), lightsKnown ? "is-reported" : "");
+
+    var chargingStatus = latest.charging_status;
+    var chargingKnown = isKnown(chargingStatus);
+    var isCharging = chargingStatus === "charging";
+    var chargeText = !chargingKnown ? "Not reported" : isCharging ? "Charging" : latest.plugged_in ? "Plugged in" : "Idle";
+    hero.classList.toggle("is-charging", isCharging);
+    setVehicleSignal("vehicle-charge-signal", chargeText, !chargingKnown ? "" : (isCharging ? "is-charging" : "is-reported"));
+
+    var battery = Number(latest.battery_pct);
+    var batteryKnown = isKnown(latest.battery_pct) && isFinite(battery);
+    var batteryEl = document.getElementById("vehicle-hero-battery");
+    var batteryUnitEl = document.getElementById("vehicle-hero-battery-unit");
+    if (batteryEl) batteryEl.textContent = batteryKnown ? String(Math.round(battery)) : "—";
+    if (batteryUnitEl) batteryUnitEl.hidden = !batteryKnown;
+
+    var liveState = document.getElementById("vehicle-live-state");
+    var visualDesc = document.getElementById("vehicle-visual-desc");
+    var stateText = "Waiting for report";
+    var stateClass = "";
+    var description = "Waiting for the most recent vehicle report.";
+    if (hasReport) {
+      stateText = "Report received";
+      stateClass = "is-reported";
+      description = "Last vehicle report received.";
+      if (openDoors.length) {
+        stateText = openDoors.length + " access point" + (openDoors.length === 1 ? "" : "s") + " open";
+        stateClass = "is-alert";
+        description = "Last vehicle report shows " + stateText + ".";
+      } else if (isCharging) {
+        stateText = "Charging";
+        stateClass = "is-charging";
+        description = "Last vehicle report shows the vehicle charging.";
+      }
+    }
+    hero.classList.toggle("has-open-access", openDoors.length > 0);
+    if (liveState) {
+      liveState.className = "vehicle-live-state" + (stateClass ? " " + stateClass : "");
+      liveState.textContent = stateText;
+    }
+    if (visualDesc) visualDesc.textContent = description;
   }
 
   // ---- tire pressure (bar; missing -> "—") ----
@@ -227,20 +313,22 @@
   function paintDoor(key, state) {
     var el = document.querySelector('.door[data-door="' + key + '"]');
     if (!el) return;
-    var open = (state === "open" || state === true);
+    var known = isKnown(state);
+    var open = known && isOn(state);
     el.classList.toggle("open", open);
-    el.classList.toggle("closed", !open);
+    el.classList.toggle("closed", known && !open);
     var st = el.querySelector(".door-state");
-    if (st) st.textContent = open ? "Open" : "Closed";
+    if (st) st.textContent = known ? (open ? "Open" : "Closed") : "—";
   }
   function paintLights(state) {
     var el = document.querySelector('.door[data-door="headlights"]');
     if (!el) return;
-    var on = (state === "on" || state === true);
+    var known = isKnown(state);
+    var on = known && isOn(state);
     el.classList.toggle("open", on);
-    el.classList.toggle("closed", !on);
+    el.classList.toggle("closed", known && !on);
     var st = el.querySelector(".door-state");
-    if (st) st.textContent = on ? "On" : "Off";
+    if (st) st.textContent = known ? (on ? "On" : "Off") : "—";
   }
 
   function setText(sel, txt) { var el = $(sel); if (el) el.textContent = txt; }
@@ -699,7 +787,7 @@
 
   // ---- live status fetch (shared by manual refresh + one-shot auto refresh) ----
   // GET /status; on a good payload merge just `latest` into the cached data and
-  // rebroadcast (updates app.js tiles AND three-scene.js). Returns a small
+  // rebroadcast (updates the tiles and the vehicle-status SVG). Returns a small
   // result object — callers decide whether to surface success/failure.
   async function fetchLiveStatus(key) {
     var res = await fetch(CONFIG.WORKER_URL + "/status", {
