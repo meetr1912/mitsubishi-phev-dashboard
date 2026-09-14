@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "module": "CommonJS",
+    "moduleResolution": "Node"
+  },
+  "include": [
+    "src/serial-mutation-queue.ts",
+    "src/snow-guard-policy.ts",
+    "src/worker-safety.ts"
+  ]
+}

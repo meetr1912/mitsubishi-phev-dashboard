@@ -35,6 +35,7 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
       # Validate the same Durable Object binding and migration configuration
       # consumed by Workers Builds. This is packaging only; Workers Builds owns
       # the production deploy.
