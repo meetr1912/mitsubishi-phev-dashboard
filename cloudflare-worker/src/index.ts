@@ -410,6 +410,12 @@ export interface Env {
   // routes the client-registration response back to us: REST doesn't seem to
   // care about client-id novelty, but MQTT's device-routing plausibly does.
   MMC_CLIENT_ID: string;
+  /**
+   * Durable, single-vehicle control plane for Snow Guard. It stores only the
+   * user's guardrails, decision receipts, and cooldown state — never account
+   * credentials or raw Mitsubishi responses.
+   */
+  SNOW_GUARD: DurableObjectNamespace;
 }
 
 // ---------------------------------------------------------------------------
@@ -838,7 +844,7 @@ async function runCommand(
 }
 
 /**
- * Climate start, with the running session torn down first.
+ * Climate start, optionally replacing the running session first.
  *
  * The vehicle allows exactly ONE active remoteAC session. A second remoteAC
  * submitted while the first is still inside its operationTime window is
@@ -849,10 +855,15 @@ async function runCommand(
  * succeeded once an engineOff was interleaved between them.
  *
  * runCommand() alone therefore only ever worked for the first press — every
- * press for the next 10 minutes was rejected. So end any running session
- * before starting the new one. An engineOff with nothing to stop answers
- * RO_FAILURE_ALREADY_STOPPED, which is the expected no-op here and must not
- * fail the start; its outcome is ignored on purpose.
+ * press for the next 10 minutes was rejected. Interactive starts therefore
+ * end any running session before starting the new one. An engineOff with
+ * nothing to stop answers RO_FAILURE_ALREADY_STOPPED, which is the expected
+ * no-op here and must not fail the start; its outcome is ignored on purpose.
+ *
+ * Callers that automate from a weather signal pass replaceExisting:false.
+ * In that mode a pre-existing session is left alone and the vehicle can reject
+ * the new request as already started; that is preferable to stopping a session
+ * a person may have started from Mitsubishi's app.
  *
  * Login, VIN lookup and wakeup are shared across both operations rather than
  * paying a second 25s wake settle for the stop. Neither remoteAC nor engineOff
@@ -861,21 +872,28 @@ async function runCommand(
 async function runClimateStart(
   env: Env,
   request: ClimateRequest,
+  options: { replaceExisting?: boolean } = {},
 ): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
   const { accessToken } = await login(env);
   const vin = await getVin(env, accessToken);
   const extra = buildHvacExtra(request, await getAvailableHvacOptions(accessToken, vin));
   await wakeUpVehicle(accessToken, vin);
 
-  try {
-    const stopped = await performOperation(env, accessToken, vin, null, "engineOff");
-    const stopEventId = (stopped as { eventId?: unknown } | null)?.eventId;
-    if (typeof stopEventId === "string" && stopEventId) {
-      await pollEvent(accessToken, vin, stopEventId, PRECONDITION_POLL_TIMEOUT_MS);
+  // A person changing climate settings in the dashboard reasonably expects
+  // their new selection to replace the current session. An unattended guard
+  // must never make that assumption: stopping a session started manually in
+  // the Mitsubishi app would be a surprising and potentially unsafe action.
+  if (options.replaceExisting !== false) {
+    try {
+      const stopped = await performOperation(env, accessToken, vin, null, "engineOff");
+      const stopEventId = (stopped as { eventId?: unknown } | null)?.eventId;
+      if (typeof stopEventId === "string" && stopEventId) {
+        await pollEvent(accessToken, vin, stopEventId, PRECONDITION_POLL_TIMEOUT_MS);
+      }
+    } catch {
+      // Best-effort: a teardown that could not even be submitted should not block
+      // the start the caller actually asked for.
     }
-  } catch {
-    // Best-effort: a teardown that could not even be submitted should not block
-    // the start the caller actually asked for.
   }
 
   const submitted = await performOperation(env, accessToken, vin, null, "remoteAC", extra);
@@ -1751,6 +1769,426 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
 }
 
 // ---------------------------------------------------------------------------
+// Snow Guard — weather-aware, non-destructive pre-conditioning
+// ---------------------------------------------------------------------------
+
+/**
+ * Snow Guard deliberately uses the immediate remoteAC path rather than the
+ * three Mitsubishi climate timer slots. Those timers are user-owned weekly
+ * schedules; changing them during a storm could overwrite native-app settings.
+ *
+ * The Durable Object stores only opt-in configuration, cooldowns, and concise
+ * action receipts — never account credentials, a PIN, a VIN, or raw payloads.
+ */
+const SNOW_GUARD_DEFAULT_NAME = "primary";
+const SNOW_GUARD_CONFIG_KEY = "config";
+const SNOW_GUARD_RUNTIME_KEY = "runtime";
+const SNOW_GUARD_EVENTS_KEY = "events";
+const SNOW_GUARD_TIMEZONE = "America/Halifax";
+const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+const SNOW_WEATHER_CODES = new Set([71, 73, 75, 77, 85, 86]);
+
+type SnowSeverity = "none" | "light" | "moderate" | "heavy";
+type SnowDecisionCode =
+  | "disabled" | "no_snow" | "light_snow" | "weather_unavailable"
+  | "daily_limit" | "cooldown" | "vehicle_moving" | "vehicle_open"
+  | "not_plugged" | "battery_unknown" | "battery_low" | "climate_started"
+  | "climate_rejected" | "climate_pending" | "climate_error";
+
+interface SnowGuardConfig {
+  enabled: boolean;
+  location: { latitude: number; longitude: number; label: string };
+  minBatteryPct: number;
+  requirePlugged: boolean;
+  maxRunsPerDay: number;
+  cooldownMinutes: number;
+}
+
+interface SnowWeather {
+  checkedAt: string;
+  temperatureC: number | null;
+  currentSnowCm: number;
+  nextHourSnowCm: number;
+  nextThreeHoursSnowCm: number;
+  weatherCode: number | null;
+  severity: SnowSeverity;
+}
+
+interface SnowGuardDecision {
+  at: string;
+  code: SnowDecisionCode;
+  summary: string;
+  weather: SnowWeather | null;
+}
+
+interface SnowGuardRuntime {
+  localDate: string;
+  runsToday: number;
+  lastAttemptAt: string | null;
+  lastRunAt: string | null;
+  lastDecision: SnowGuardDecision | null;
+}
+
+interface SnowGuardEvent {
+  at: string;
+  code: SnowDecisionCode;
+  summary: string;
+  weather: SnowWeather | null;
+  action?: { minutes: number; outcome: EventOutcome["outcome"] | "submitted"; errorLabel: string | null };
+}
+
+interface SnowGuardSnapshot {
+  config: SnowGuardConfig;
+  runtime: SnowGuardRuntime;
+  events: SnowGuardEvent[];
+}
+
+const DEFAULT_SNOW_GUARD_CONFIG: SnowGuardConfig = {
+  // Explicit opt-in: deploying this feature must not start remote climate.
+  enabled: false,
+  location: { latitude: 44.6488, longitude: -63.5752, label: "Halifax, NS" },
+  minBatteryPct: 35,
+  requirePlugged: true,
+  maxRunsPerDay: 2,
+  cooldownMinutes: 360,
+};
+
+function halifaxDate(date: Date): string {
+  const values: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat("en-CA", {
+    timeZone: SNOW_GUARD_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(date)) {
+    if (part.type !== "literal") values[part.type] = part.value;
+  }
+  return `${values.year ?? "0000"}-${values.month ?? "00"}-${values.day ?? "00"}`;
+}
+
+function snowGuardDefaultRuntime(now = new Date()): SnowGuardRuntime {
+  return { localDate: halifaxDate(now), runsToday: 0, lastAttemptAt: null, lastRunAt: null, lastDecision: null };
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function nonNegativeNumber(value: unknown): number {
+  const n = finiteNumber(value);
+  return n === null ? 0 : Math.max(0, n);
+}
+
+function sumValues(value: unknown, start: number, count: number): number {
+  if (!Array.isArray(value)) return 0;
+  return value.slice(start, start + count).reduce<number>((sum, item) => sum + nonNegativeNumber(item), 0);
+}
+
+function firstForecastIndex(times: unknown, currentTime: unknown): number {
+  if (!Array.isArray(times) || typeof currentTime !== "string") return 0;
+  const index = times.findIndex((time) => typeof time === "string" && time >= currentTime);
+  return index < 0 ? 0 : index;
+}
+
+function summarizeSnowSeverity(
+  temperatureC: number | null, currentSnowCm: number, nextHourSnowCm: number,
+  nextThreeHoursSnowCm: number, weatherCode: number | null,
+): SnowSeverity {
+  // Above this temperature the useful outcome is generally rain/slush, not
+  // enough to justify an unattended traction-battery climate cycle.
+  if (temperatureC === null || temperatureC > 2.5) return "none";
+  const currentSnowSignal = currentSnowCm >= 0.05 || (weatherCode !== null && SNOW_WEATHER_CODES.has(weatherCode));
+  const nearTermSnow = Math.max(currentSnowSignal ? 0.3 : 0, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm);
+  if (nearTermSnow < 0.3) return "none";
+  if (nearTermSnow < 1.5) return "light";
+  if (nearTermSnow < 4) return "moderate";
+  return "heavy";
+}
+
+async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
+  const query = new URLSearchParams({
+    latitude: String(config.location.latitude), longitude: String(config.location.longitude),
+    timezone: SNOW_GUARD_TIMEZONE, current: "temperature_2m,snowfall,weather_code",
+    minutely_15: "snowfall", forecast_minutely_15: "12",
+  });
+  const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`);
+  if (!response.ok) throw new ApiError(502, `Weather lookup failed: HTTP ${response.status}`);
+  const raw = (await response.json().catch(() => null)) as {
+    current?: { time?: unknown; temperature_2m?: unknown; snowfall?: unknown; weather_code?: unknown };
+    minutely_15?: { time?: unknown; snowfall?: unknown };
+  } | null;
+  if (!raw?.current) throw new ApiError(502, "Weather lookup returned no current conditions");
+  const currentSnowCm = nonNegativeNumber(raw.current.snowfall);
+  const weatherCode = finiteNumber(raw.current.weather_code);
+  const index = firstForecastIndex(raw.minutely_15?.time, raw.current.time);
+  const nextHourSnowCm = sumValues(raw.minutely_15?.snowfall, index, 4);
+  const nextThreeHoursSnowCm = sumValues(raw.minutely_15?.snowfall, index, 12);
+  const temperatureC = finiteNumber(raw.current.temperature_2m);
+  return {
+    checkedAt: new Date().toISOString(), temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode,
+    severity: summarizeSnowSeverity(temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode),
+  };
+}
+
+function normaliseSnowGuardConfig(input: unknown, current = DEFAULT_SNOW_GUARD_CONFIG): SnowGuardConfig {
+  const source = input !== null && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const locationInput = source.location !== null && typeof source.location === "object" && !Array.isArray(source.location)
+    ? source.location as Record<string, unknown>
+    : {};
+  const latitude = finiteNumber(locationInput.latitude);
+  const longitude = finiteNumber(locationInput.longitude);
+  // A city-level location is sufficient. The vehicle's own location never
+  // needs to be sent to a weather service for this use case.
+  const location = latitude !== null && longitude !== null && latitude >= 43 && latitude <= 46 && longitude >= -66 && longitude <= -60
+    ? {
+        latitude,
+        longitude,
+        label: typeof locationInput.label === "string" && locationInput.label.trim()
+          ? locationInput.label.trim().slice(0, 64)
+          : current.location.label,
+      }
+    : current.location;
+  const minBatteryPct = finiteNumber(source.minBatteryPct);
+  const maxRunsPerDay = finiteNumber(source.maxRunsPerDay);
+  const cooldownMinutes = finiteNumber(source.cooldownMinutes);
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : current.enabled,
+    location,
+    minBatteryPct: minBatteryPct === null ? current.minBatteryPct : Math.round(Math.max(20, Math.min(80, minBatteryPct))),
+    requirePlugged: typeof source.requirePlugged === "boolean" ? source.requirePlugged : current.requirePlugged,
+    maxRunsPerDay: maxRunsPerDay === null ? current.maxRunsPerDay : Math.round(Math.max(1, Math.min(3, maxRunsPerDay))),
+    cooldownMinutes: cooldownMinutes === null ? current.cooldownMinutes : Math.round(Math.max(180, Math.min(720, cooldownMinutes))),
+  };
+}
+
+function snowDecision(code: SnowDecisionCode, summary: string, weather: SnowWeather | null): SnowGuardDecision {
+  return { at: new Date().toISOString(), code, summary, weather };
+}
+
+function snowWeatherSummary(weather: SnowWeather): string {
+  return `${weather.severity} snow risk · ${weather.nextThreeHoursSnowCm.toFixed(1)} cm forecast over 3 h`;
+}
+
+function isOpenDoorValue(value: JsonValue | undefined): boolean {
+  return value === "open";
+}
+
+/**
+ * One stateful instance per dashboard. It only receives public requests after
+ * the outer Worker has authenticated them; cron calls the bound object directly
+ * and is never externally routable.
+ */
+export class SnowGuard {
+  constructor(
+    private readonly state: DurableObjectState,
+    private readonly env: Env,
+  ) {}
+
+  private async snapshot(): Promise<SnowGuardSnapshot> {
+    const [storedConfig, storedRuntime, storedEvents] = await Promise.all([
+      this.state.storage.get<SnowGuardConfig>(SNOW_GUARD_CONFIG_KEY),
+      this.state.storage.get<SnowGuardRuntime>(SNOW_GUARD_RUNTIME_KEY),
+      this.state.storage.get<SnowGuardEvent[]>(SNOW_GUARD_EVENTS_KEY),
+    ]);
+    const config = normaliseSnowGuardConfig(storedConfig);
+    const runtime = storedRuntime ?? snowGuardDefaultRuntime();
+    const today = halifaxDate(new Date());
+    if (runtime.localDate !== today) {
+      runtime.localDate = today;
+      runtime.runsToday = 0;
+      await this.state.storage.put(SNOW_GUARD_RUNTIME_KEY, runtime);
+    }
+    return { config, runtime, events: Array.isArray(storedEvents) ? storedEvents : [] };
+  }
+
+  private async save(snapshot: SnowGuardSnapshot): Promise<void> {
+    await this.state.storage.put({
+      [SNOW_GUARD_CONFIG_KEY]: snapshot.config,
+      [SNOW_GUARD_RUNTIME_KEY]: snapshot.runtime,
+      [SNOW_GUARD_EVENTS_KEY]: snapshot.events,
+    });
+  }
+
+  private async record(
+    snapshot: SnowGuardSnapshot,
+    decision: SnowGuardDecision,
+    action?: SnowGuardEvent["action"],
+  ): Promise<SnowGuardSnapshot> {
+    snapshot.runtime.lastDecision = decision;
+    snapshot.events = [
+      { at: decision.at, code: decision.code, summary: decision.summary, weather: decision.weather, ...(action ? { action } : {}) },
+      ...snapshot.events,
+    ].slice(0, 40);
+    await this.save(snapshot);
+    return snapshot;
+  }
+
+  private async dryRun(): Promise<SnowGuardSnapshot> {
+    const snapshot = await this.snapshot();
+    if (!snapshot.config.enabled) {
+      snapshot.runtime.lastDecision = snowDecision("disabled", "Snow Guard is off. Enable it to run automatic checks.", null);
+      await this.save(snapshot);
+      return snapshot;
+    }
+    try {
+      const weather = await fetchSnowWeather(snapshot.config);
+      const code: SnowDecisionCode = weather.severity === "none" ? "no_snow" : weather.severity === "light" ? "light_snow" : "climate_pending";
+      const summary = code === "climate_pending"
+        ? `${snowWeatherSummary(weather)}. The next scheduled check can precondition if vehicle safeguards pass.`
+        : code === "light_snow"
+          ? `${snowWeatherSummary(weather)}. Below the automatic preconditioning threshold.`
+          : "No meaningful near-term snow risk.";
+      snapshot.runtime.lastDecision = snowDecision(code, summary, weather);
+      await this.save(snapshot);
+      return snapshot;
+    } catch {
+      snapshot.runtime.lastDecision = snowDecision("weather_unavailable", "Weather could not be checked. No vehicle action was sent.", null);
+      await this.save(snapshot);
+      return snapshot;
+    }
+  }
+
+  private async tick(): Promise<SnowGuardSnapshot> {
+    const snapshot = await this.snapshot();
+    if (!snapshot.config.enabled) return snapshot;
+
+    let weather: SnowWeather;
+    try {
+      weather = await fetchSnowWeather(snapshot.config);
+    } catch {
+      return this.record(snapshot, snowDecision("weather_unavailable", "Weather could not be checked. No vehicle action was sent.", null));
+    }
+
+    if (weather.severity === "none") {
+      snapshot.runtime.lastDecision = snowDecision("no_snow", "No meaningful near-term snow risk.", weather);
+      await this.save(snapshot);
+      return snapshot;
+    }
+    if (weather.severity === "light") {
+      return this.record(snapshot, snowDecision("light_snow", `${snowWeatherSummary(weather)}. Below the automatic preconditioning threshold.`, weather));
+    }
+
+    const now = Date.now();
+    if (snapshot.runtime.runsToday >= snapshot.config.maxRunsPerDay) {
+      return this.record(snapshot, snowDecision("daily_limit", `Daily limit reached (${snapshot.config.maxRunsPerDay} Snow Guard runs).`, weather));
+    }
+    if (snapshot.runtime.lastAttemptAt) {
+      const elapsed = now - Date.parse(snapshot.runtime.lastAttemptAt);
+      if (Number.isFinite(elapsed) && elapsed < snapshot.config.cooldownMinutes * 60_000) {
+        return this.record(snapshot, snowDecision("cooldown", `Cooldown active; Snow Guard will not repeat within ${snapshot.config.cooldownMinutes / 60} h.`, weather));
+      }
+    }
+
+    let latest: Record<string, JsonValue>;
+    try {
+      const { accessToken } = await login(this.env);
+      const vin = await getVin(this.env, accessToken);
+      latest = await fetchLiveStatus(this.env, accessToken, vin);
+    } catch {
+      return this.record(snapshot, snowDecision("climate_error", "Vehicle status could not be confirmed. No climate action was sent.", weather));
+    }
+
+    const speed = finiteNumber(latest.speed_kmh);
+    if (latest.ignition_on === true || (speed !== null && speed > 0)) {
+      return this.record(snapshot, snowDecision("vehicle_moving", "Vehicle appears to be in use. No climate action was sent.", weather));
+    }
+    const doors = latest.doors;
+    if (doors !== null && typeof doors === "object" && !Array.isArray(doors) && Object.values(doors).some(isOpenDoorValue)) {
+      return this.record(snapshot, snowDecision("vehicle_open", "A vehicle access point is reported open. No climate action was sent.", weather));
+    }
+    if (snapshot.config.requirePlugged && latest.plugged_in !== true) {
+      return this.record(snapshot, snowDecision("not_plugged", "Vehicle is not reported plugged in. No climate action was sent.", weather));
+    }
+    const batteryPct = finiteNumber(latest.battery_pct);
+    if (batteryPct === null) {
+      return this.record(snapshot, snowDecision("battery_unknown", "Battery level was not reported. No climate action was sent.", weather));
+    }
+    if (batteryPct < snapshot.config.minBatteryPct) {
+      return this.record(snapshot, snowDecision("battery_low", `Battery is ${Math.round(batteryPct)}%; Snow Guard requires ${snapshot.config.minBatteryPct}% or more.`, weather));
+    }
+
+    // Persist the attempt before the remote request. A timeout must not cause
+    // another climate start on the next 15-minute tick.
+    const nowIso = new Date(now).toISOString();
+    snapshot.runtime.lastAttemptAt = nowIso;
+    await this.save(snapshot);
+
+    const minutes = weather.severity === "heavy" ? 30 : 20;
+    const request: ClimateRequest = {
+      minutes,
+      temperatureC: 28,
+      options: [MAX_DEFROST_OPTION, "defrost_front"],
+      posmap: null,
+    };
+    try {
+      // This is the vital behavioural split from an interactive update:
+      // automated weather logic never stops a currently running session.
+      const result = await runClimateStart(this.env, request, { replaceExisting: false });
+      if (result.event?.outcome === "failed") {
+        const activeElsewhere = result.event.errorLabel === "RO_FAILURE_ALREADY_STARTED";
+        return this.record(
+          snapshot,
+          snowDecision(
+            "climate_rejected",
+            activeElsewhere
+              ? "Climate is already running, so Snow Guard left it alone."
+              : `Vehicle rejected the Snow Guard climate request${result.event.errorLabel ? ` (${result.event.errorLabel})` : ""}.`,
+            weather,
+          ),
+          { minutes, outcome: result.event.outcome, errorLabel: result.event.errorLabel },
+        );
+      }
+      snapshot.runtime.lastRunAt = nowIso;
+      snapshot.runtime.runsToday++;
+      const outcome = result.event?.outcome ?? "submitted";
+      return this.record(
+        snapshot,
+        snowDecision(
+          outcome === "succeeded" ? "climate_started" : "climate_pending",
+          outcome === "succeeded"
+            ? `Snow Guard started ${minutes}-minute windshield preconditioning.`
+            : `Snow Guard submitted ${minutes}-minute windshield preconditioning; vehicle confirmation is pending.`,
+          weather,
+        ),
+        { minutes, outcome, errorLabel: result.event?.errorLabel ?? null },
+      );
+    } catch {
+      return this.record(snapshot, snowDecision("climate_error", "Snow Guard could not submit a climate action. It will not retry until the cooldown ends.", weather));
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/snow-guard") {
+      return json({ success: true, ...(await this.snapshot()) });
+    }
+    if (request.method === "PUT" && url.pathname === "/snow-guard") {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ success: false, error: "Invalid JSON body" }, 400);
+      }
+      const snapshot = await this.snapshot();
+      snapshot.config = normaliseSnowGuardConfig(body, snapshot.config);
+      snapshot.runtime.lastDecision = snowDecision(
+        snapshot.config.enabled ? "climate_pending" : "disabled",
+        snapshot.config.enabled ? "Snow Guard enabled. It will check Halifax weather every 15 minutes." : "Snow Guard is off.",
+        snapshot.runtime.lastDecision?.weather ?? null,
+      );
+      await this.save(snapshot);
+      return json({ success: true, ...snapshot });
+    }
+    if (request.method === "POST" && url.pathname === "/snow-guard/check") {
+      return json({ success: true, ...(await this.dryRun()) });
+    }
+    if (request.method === "POST" && url.pathname === "/snow-guard/tick") {
+      return json({ success: true, ...(await this.tick()) });
+    }
+    return json({ success: false, error: "Not found" }, 404);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Worker entrypoint
 // ---------------------------------------------------------------------------
 
@@ -1767,7 +2205,10 @@ export default {
     const isSettings = url.pathname === "/settings" && request.method === "GET";
     const isConfig = url.pathname === "/config" && request.method === "GET";
     const isState = url.pathname === "/state" && request.method === "GET";
-    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState) {
+    const isSnowGuard =
+      (url.pathname === "/snow-guard" && (request.method === "GET" || request.method === "PUT")) ||
+      (url.pathname === "/snow-guard/check" && request.method === "POST");
+    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState && !isSnowGuard) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -1775,6 +2216,13 @@ export default {
     const providedKey = request.headers.get("X-Dashboard-Key") ?? "";
     if (!env.DASHBOARD_API_KEY || !(await timingSafeEqual(providedKey, env.DASHBOARD_API_KEY))) {
       return json({ success: false, error: "Unauthorized" }, 401);
+    }
+
+    if (isSnowGuard) {
+      // The Durable Object is not publicly addressable. This authenticated
+      // proxy is deliberately the only browser path to settings and receipts.
+      const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
+      return env.SNOW_GUARD.get(id).fetch(request);
     }
 
     if (isStatus) {
@@ -2198,5 +2646,12 @@ export default {
       }
       return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Disabled guards return before their weather request, so this 15-minute
+    // cron is effectively free of vehicle/API work until the owner opts in.
+    const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
+    ctx.waitUntil(env.SNOW_GUARD.get(id).fetch("https://snow-guard/snow-guard/tick", { method: "POST" }));
   },
 };

@@ -327,6 +327,51 @@
           </details>
         </details>
       </section>
+
+      <details class="snow-guard-card" id="snow-guard-panel">
+        <summary>
+          <span>Snow Guard</span>
+          <span class="snow-guard-summary" id="snow-guard-summary">Locked</span>
+        </summary>
+        <div class="snow-guard-content">
+          <p class="section-note">Watches Halifax weather every 15 minutes and starts windshield preconditioning only for meaningful snow. It never changes your Mitsubishi climate timers.</p>
+          <p class="snow-guard-warning">This clears the cabin and glass; it cannot keep the roof or hood dry. Snow Guard never stops a climate session that is already running.</p>
+
+          <label class="snow-guard-switch">
+            <input type="checkbox" id="snow-guard-enabled" />
+            <span>Enable Snow Guard</span>
+          </label>
+
+          <div class="snow-guard-settings">
+            <label>Weather location
+              <input id="snow-guard-location" type="text" value="Halifax, NS" readonly aria-readonly="true" />
+            </label>
+            <label>Minimum battery
+              <select id="snow-guard-min-battery">
+                <option value="25">25%</option>
+                <option value="35" selected>35%</option>
+                <option value="50">50%</option>
+                <option value="65">65%</option>
+              </select>
+            </label>
+          </div>
+          <label class="snow-guard-switch snow-guard-switch--minor">
+            <input type="checkbox" id="snow-guard-require-plugged" checked />
+            <span>Only run when plugged in</span>
+          </label>
+          <p class="snow-guard-guardrail">Guardrails: moderate/heavy snow only · 20–30 min defrost · max 2 runs/day · 6 h cooldown.</p>
+
+          <div class="snow-guard-status" id="snow-guard-status" aria-live="polite">Unlock to load Snow Guard.</div>
+          <div class="snow-guard-actions">
+            <button type="button" class="btn-ghost" id="snow-guard-check">Check conditions</button>
+            <button type="button" class="save-button snow-guard-save" id="snow-guard-save">Save Snow Guard</button>
+          </div>
+          <div class="snow-guard-history" id="snow-guard-history" hidden>
+            <p class="eyebrow">Recent Snow Guard activity</p>
+            <ul id="snow-guard-history-list"></ul>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div class="tab-view" id="tab-vehicle" data-tab="vehicle" role="tabpanel" aria-label="Vehicle">

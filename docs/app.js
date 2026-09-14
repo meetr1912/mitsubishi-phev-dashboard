@@ -116,6 +116,9 @@
       // read before the UI becomes writable, because the Worker preserves the
       // vehicle's saved temperature and equipment-specific HVAC settings.
       loadClimateSchedule();
+      // Snow Guard is separate Worker-owned state. It never edits the three
+      // Mitsubishi climate timers and remains opt-in.
+      loadSnowGuard();
     }
   }
 
@@ -1504,6 +1507,166 @@
       if (day) { day.classList.toggle("active"); return; }
       var save = e.target.closest("#climate-schedule-save");
       if (save) { saveClimateSchedule(); }
+    });
+  }
+
+  // ---- Snow Guard --------------------------------------------------------
+  // This is intentionally separate from the three Mitsubishi climate timer
+  // slots. The Worker persists its settings and decisions, then an internal
+  // 15-minute cron may submit a *new* remote climate request when safeguards
+  // and meaningful near-term snow agree. "Check conditions" is dry-run only.
+  var snowGuardPanel = document.getElementById("snow-guard-panel");
+  var snowGuardEnabledEl = document.getElementById("snow-guard-enabled");
+  var snowGuardLocationEl = document.getElementById("snow-guard-location");
+  var snowGuardMinBatteryEl = document.getElementById("snow-guard-min-battery");
+  var snowGuardPluggedEl = document.getElementById("snow-guard-require-plugged");
+  var snowGuardStatusEl = document.getElementById("snow-guard-status");
+  var snowGuardSummaryEl = document.getElementById("snow-guard-summary");
+  var snowGuardSaveBtn = document.getElementById("snow-guard-save");
+  var snowGuardCheckBtn = document.getElementById("snow-guard-check");
+  var snowGuardHistoryEl = document.getElementById("snow-guard-history");
+  var snowGuardHistoryListEl = document.getElementById("snow-guard-history-list");
+  var snowGuardState = null;
+
+  async function snowGuardRequest(path, method, payload) {
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) return null;
+    var res = await fetch(CONFIG.WORKER_URL + path, {
+      method: method,
+      headers: Object.assign({ "X-Dashboard-Key": key }, payload ? { "Content-Type": "application/json" } : {}),
+      body: payload ? JSON.stringify(payload) : undefined
+    });
+    var body = {};
+    try { body = await res.json(); } catch (e) { /* non-JSON is handled by status */ }
+    return { ok: res.ok, body: body };
+  }
+
+  function snowGuardKind(code) {
+    if (code === "climate_started") return "good";
+    if (code === "climate_pending" || code === "light_snow" || code === "cooldown" || code === "daily_limit") return "caution";
+    if (code === "weather_unavailable" || code === "climate_error" || code === "climate_rejected") return "error";
+    return "";
+  }
+
+  function formatSnowWeather(weather) {
+    if (!weather) return "";
+    var temp = typeof weather.temperatureC === "number" ? Math.round(weather.temperatureC) + "°C" : "temperature unavailable";
+    var snow = typeof weather.nextThreeHoursSnowCm === "number" ? weather.nextThreeHoursSnowCm.toFixed(1) + " cm / 3 h" : "snowfall unavailable";
+    return temp + " · " + snow;
+  }
+
+  function renderSnowGuard(body) {
+    if (!body) return;
+    snowGuardState = body;
+    var config = body.config || {};
+    var runtime = body.runtime || {};
+    if (snowGuardEnabledEl) snowGuardEnabledEl.checked = config.enabled === true;
+    if (snowGuardLocationEl && config.location && config.location.label) snowGuardLocationEl.value = config.location.label;
+    if (snowGuardMinBatteryEl && config.minBatteryPct != null) snowGuardMinBatteryEl.value = String(config.minBatteryPct);
+    if (snowGuardPluggedEl) snowGuardPluggedEl.checked = config.requirePlugged !== false;
+    if (snowGuardSummaryEl) {
+      snowGuardSummaryEl.textContent = config.enabled ? "On · 15 min" : "Off";
+      snowGuardSummaryEl.classList.toggle("active", config.enabled === true);
+    }
+    var decision = runtime.lastDecision || null;
+    if (snowGuardStatusEl) {
+      snowGuardStatusEl.className = "snow-guard-status" + (decision ? " " + snowGuardKind(decision.code) : "");
+      if (decision) {
+        var weather = formatSnowWeather(decision.weather);
+        snowGuardStatusEl.textContent = decision.summary + (weather ? " " + weather + "." : "");
+      } else {
+        snowGuardStatusEl.textContent = config.enabled ? "Ready. Waiting for the next weather check." : "Snow Guard is off.";
+      }
+    }
+    var events = Array.isArray(body.events) ? body.events.slice(0, 6) : [];
+    if (snowGuardHistoryEl) snowGuardHistoryEl.hidden = events.length === 0;
+    if (snowGuardHistoryListEl) {
+      snowGuardHistoryListEl.textContent = "";
+      events.forEach(function (event) {
+        var item = document.createElement("li");
+        var title = document.createElement("strong");
+        title.textContent = fmtTs(event.at) + " · " + titleize(event.code || "snow guard");
+        var copy = document.createElement("span");
+        copy.textContent = (event.summary || "") + (event.weather ? " " + formatSnowWeather(event.weather) + "." : "");
+        item.appendChild(title);
+        item.appendChild(copy);
+        snowGuardHistoryListEl.appendChild(item);
+      });
+    }
+  }
+
+  async function loadSnowGuard() {
+    if (!snowGuardPanel) return;
+    var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
+    if (!key) {
+      if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Unlock to load Snow Guard.";
+      return;
+    }
+    try {
+      var result = await snowGuardRequest("/snow-guard", "GET");
+      if (!result || !result.ok || !result.body || !result.body.success) throw new Error("request failed");
+      renderSnowGuard(result.body);
+    } catch (e) {
+      if (snowGuardStatusEl) {
+        snowGuardStatusEl.className = "snow-guard-status error";
+        snowGuardStatusEl.textContent = "Could not load Snow Guard.";
+      }
+    }
+  }
+
+  async function saveSnowGuard() {
+    if (!snowGuardSaveBtn || snowGuardSaveBtn.disabled) return;
+    snowGuardSaveBtn.disabled = true;
+    snowGuardSaveBtn.classList.add("sending");
+    if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Saving Snow Guard…";
+    var current = (snowGuardState && snowGuardState.config) || {};
+    var config = {
+      enabled: !!(snowGuardEnabledEl && snowGuardEnabledEl.checked),
+      minBatteryPct: parseInt(snowGuardMinBatteryEl && snowGuardMinBatteryEl.value, 10) || 35,
+      requirePlugged: !!(snowGuardPluggedEl && snowGuardPluggedEl.checked),
+      maxRunsPerDay: current.maxRunsPerDay || 2,
+      cooldownMinutes: current.cooldownMinutes || 360,
+      location: current.location || { latitude: 44.6488, longitude: -63.5752, label: "Halifax, NS" }
+    };
+    try {
+      var result = await snowGuardRequest("/snow-guard", "PUT", config);
+      if (!result || !result.ok || !result.body || !result.body.success) throw new Error((result && result.body && result.body.error) || "request failed");
+      renderSnowGuard(result.body);
+      toast(config.enabled ? "Snow Guard enabled." : "Snow Guard disabled.", "success");
+    } catch (e) {
+      if (snowGuardStatusEl) {
+        snowGuardStatusEl.className = "snow-guard-status error";
+        snowGuardStatusEl.textContent = "Snow Guard was not saved.";
+      }
+      toast("Snow Guard save failed.", "error");
+    } finally {
+      snowGuardSaveBtn.classList.remove("sending");
+      snowGuardSaveBtn.disabled = false;
+    }
+  }
+
+  async function checkSnowGuard() {
+    if (!snowGuardCheckBtn || snowGuardCheckBtn.disabled) return;
+    snowGuardCheckBtn.disabled = true;
+    if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Checking Halifax conditions…";
+    try {
+      var result = await snowGuardRequest("/snow-guard/check", "POST");
+      if (!result || !result.ok || !result.body || !result.body.success) throw new Error("request failed");
+      renderSnowGuard(result.body);
+    } catch (e) {
+      if (snowGuardStatusEl) {
+        snowGuardStatusEl.className = "snow-guard-status error";
+        snowGuardStatusEl.textContent = "Could not check conditions. No vehicle action was sent.";
+      }
+    } finally {
+      snowGuardCheckBtn.disabled = false;
+    }
+  }
+
+  if (snowGuardPanel) {
+    snowGuardPanel.addEventListener("click", function (e) {
+      if (e.target.closest("#snow-guard-save")) { saveSnowGuard(); return; }
+      if (e.target.closest("#snow-guard-check")) { checkSnowGuard(); }
     });
   }
 

@@ -4,3 +4,14 @@
 name = "phev-command-relay"
 main = "cloudflare-worker/src/index.ts"
 compatibility_date = "2025-07-01"
+
+[[durable_objects.bindings]]
+name = "SNOW_GUARD"
+class_name = "SnowGuard"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SnowGuard"]
+
+[triggers]
+crons = ["*/15 * * * *"]

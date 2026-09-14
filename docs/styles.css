@@ -459,6 +459,66 @@ svg { display: block; }
 .service-discovery > summary { min-height: 45px; padding: 0 .65rem; color: var(--secondary); font-size: .75rem; }
 .service-discovery .vehicle-support-chips { padding: 0 .65rem .65rem; }
 
+/* Snow Guard */
+.snow-guard-card {
+  margin-bottom: .75rem;
+  overflow: clip;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.snow-guard-card > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 54px;
+  padding: 0 .9rem;
+  cursor: pointer;
+  list-style: none;
+  color: var(--text);
+  font-size: .9rem;
+  font-weight: 700;
+}
+.snow-guard-card > summary::-webkit-details-marker { display: none; }
+.snow-guard-card > summary::after { content: "+"; order: 3; margin-left: .55rem; color: var(--blue); font-size: 1.15rem; font-weight: 400; }
+.snow-guard-card[open] > summary::after { content: "−"; }
+.snow-guard-summary { margin-left: auto; color: var(--secondary); font-size: .7rem; font-weight: 650; }
+.snow-guard-summary.active { color: var(--green); }
+.snow-guard-content { padding: 0 .85rem .85rem; border-top: 1px solid var(--border); }
+.snow-guard-warning,
+.snow-guard-guardrail,
+.snow-guard-status {
+  margin: .75rem 0 0;
+  padding: .68rem .72rem;
+  border-radius: 10px;
+  font-size: .74rem;
+  line-height: 1.42;
+}
+.snow-guard-warning,
+.snow-guard-guardrail { background: var(--orange-wash); color: var(--orange); }
+.snow-guard-status { border: 1px solid var(--border); background: var(--surface-muted); color: var(--secondary); }
+.snow-guard-status.good { border-color: rgba(22, 132, 91, .28); background: var(--green-wash); color: var(--green); }
+.snow-guard-status.caution { border-color: rgba(179, 91, 0, .26); background: var(--orange-wash); color: var(--orange); }
+.snow-guard-status.error { border-color: rgba(199, 45, 56, .28); background: var(--red-wash); color: var(--red); }
+.snow-guard-switch { display: flex; align-items: center; gap: .6rem; min-height: 46px; margin-top: .85rem; color: var(--text); font-size: .82rem; font-weight: 700; }
+.snow-guard-switch input { width: 19px; height: 19px; accent-color: var(--blue); }
+.snow-guard-switch--minor { min-height: 36px; margin-top: .55rem; color: var(--secondary); font-size: .76rem; font-weight: 600; }
+.snow-guard-settings { display: grid; grid-template-columns: minmax(0, 1fr) 110px; gap: .55rem; margin-top: .2rem; }
+.snow-guard-settings label { display: grid; gap: .32rem; color: var(--secondary); font-size: .68rem; font-weight: 650; }
+.snow-guard-settings input,
+.snow-guard-settings select { min-width: 0; min-height: 40px; padding: .45rem .5rem; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); color: var(--text); font: inherit; font-size: .8rem; }
+.snow-guard-actions { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: .55rem; margin-top: .75rem; }
+.snow-guard-actions .btn-ghost,
+.snow-guard-actions .save-button { min-height: 46px; margin-top: 0; font-size: .8rem; }
+.snow-guard-actions .btn-ghost { border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); color: var(--blue); font-weight: 700; }
+.snow-guard-history { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+.snow-guard-history .eyebrow { margin: 0; }
+.snow-guard-history ul { display: grid; gap: .45rem; margin: .6rem 0 0; padding: 0; list-style: none; }
+.snow-guard-history li { display: grid; gap: .15rem; padding: .6rem .65rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+.snow-guard-history strong { color: var(--text); font-size: .72rem; }
+.snow-guard-history span { color: var(--secondary); font-size: .7rem; line-height: 1.35; }
+
 /* Vehicle */
 .condition-list { display: grid; gap: 1px; overflow: hidden; margin-top: .85rem; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--border); }
 .door { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: .55rem; min-height: 49px; padding: .6rem .7rem; background: var(--surface); }
