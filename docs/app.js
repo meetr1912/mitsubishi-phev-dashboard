@@ -1607,12 +1607,14 @@
     }
     try {
       var result = await snowGuardRequest("/snow-guard", "GET");
-      if (!result || !result.ok || !result.body || !result.body.success) throw new Error("request failed");
+      if (!result || !result.ok || !result.body || !result.body.success) {
+        throw new Error((result && result.body && result.body.error) || "request failed");
+      }
       renderSnowGuard(result.body);
     } catch (e) {
       if (snowGuardStatusEl) {
         snowGuardStatusEl.className = "snow-guard-status error";
-        snowGuardStatusEl.textContent = "Could not load Snow Guard.";
+        snowGuardStatusEl.textContent = "Could not load Snow Guard" + (e && e.message ? ": " + e.message : ".");
       }
     }
   }
@@ -1654,12 +1656,14 @@
     if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Checking Halifax conditions…";
     try {
       var result = await snowGuardRequest("/snow-guard/check", "POST");
-      if (!result || !result.ok || !result.body || !result.body.success) throw new Error("request failed");
+      if (!result || !result.ok || !result.body || !result.body.success) {
+        throw new Error((result && result.body && result.body.error) || "request failed");
+      }
       renderSnowGuard(result.body);
     } catch (e) {
       if (snowGuardStatusEl) {
         snowGuardStatusEl.className = "snow-guard-status error";
-        snowGuardStatusEl.textContent = "Could not check conditions. No vehicle action was sent.";
+        snowGuardStatusEl.textContent = "Could not check conditions" + (e && e.message ? ": " + e.message : ".") + " No vehicle action was sent.";
       }
     } finally {
       snowGuardCheckBtn.disabled = false;
