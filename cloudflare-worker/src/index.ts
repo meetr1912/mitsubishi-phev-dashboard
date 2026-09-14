@@ -30,7 +30,20 @@ import {
   type SnowSeverity,
   type SnowWeatherConfidence,
 } from "./snow-guard-policy";
+import { isFreshVhrRefreshEvidence, parseHealthCalibrationTelemetry, telemetryTimestampIsRecent } from "./snow-guard-telemetry";
 import {
+  ECCC_HALIFAX_CITY_PAGE_URL,
+  ecccCityPageIsFresh,
+  parseEcccCityPageDisplay,
+  weatherSourceFailureFromHttp,
+  weatherSourceFailureFromPayload,
+  weatherSourceFailureFromTransport,
+  weatherSourceFailureMessage,
+  type EcccCityPageDisplay,
+  type SnowWeatherSourceFailure,
+} from "./snow-guard-weather";
+import {
+  screenedReportedBatteryDeltaPct,
   isSnowFeedbackOutcome,
   newSnowCalibrationCase,
   retainSnowCalibrationCases,
@@ -326,11 +339,11 @@ export interface ClimateRequest {
  * on this DGE, so capability detection is deliberately best-effort: when the
  * settings read is unavailable or unrecognised we keep the old minimal payload.
  */
-async function getAvailableHvacOptions(accessToken: string, vin: string): Promise<Set<string> | null> {
+async function getAvailableHvacOptions(accessToken: string, vin: string, signal?: AbortSignal): Promise<Set<string> | null> {
   try {
     const res = await fetch(
       `${BASE_URL}${EP_PARENTAL_ALERT.replace("{vin}", encodeURIComponent(vin))}?operation=remoteAC`,
-      { headers: sharedHeaders(`Bearer ${accessToken}`) },
+      { headers: sharedHeaders(`Bearer ${accessToken}`), signal },
     );
     if (!res.ok) return null;
     const raw = (await res.json().catch(() => null)) as JsonValue;
@@ -844,7 +857,7 @@ export interface LoginResult {
  * handshake (registration topics are keyed by accountDN; the MQTT CONNECT username
  * must be the same clientId used for this login, per C1847g.java:1148-1149).
  */
-async function login(env: Env): Promise<LoginResult> {
+async function login(env: Env, signal?: AbortSignal): Promise<LoginResult> {
   const clientId = env.MMC_CLIENT_ID;
   const basic = "Basic " + bytesToB64(new TextEncoder().encode(`${clientId}:${CLIENT_TRUSTED_SECRET}`));
 
@@ -856,6 +869,7 @@ async function login(env: Env): Promise<LoginResult> {
       username: env.MMC_USERNAME,
       password: env.MMC_PASSWORD,
     }),
+    signal,
   });
 
   if (!res.ok) {
@@ -868,9 +882,9 @@ async function login(env: Env): Promise<LoginResult> {
 }
 
 /** Look up the account's first VIN. Confirmed against the working read-only client. */
-async function getVin(env: Env, accessToken: string): Promise<string> {
+async function getVin(env: Env, accessToken: string, signal?: AbortSignal): Promise<string> {
   const url = BASE_URL + EP_USER_INFO + encodeURIComponent(env.MMC_USERNAME);
-  const res = await fetch(url, { method: "GET", headers: sharedHeaders(`Bearer ${accessToken}`) });
+  const res = await fetch(url, { method: "GET", headers: sharedHeaders(`Bearer ${accessToken}`), signal });
 
   if (!res.ok) {
     throw new ApiError(502, `VIN lookup failed: HTTP ${res.status} ${await safeText(res)}`);
@@ -970,6 +984,7 @@ async function performOperation(
   pinToken: string | null,
   operation: string,
   extra?: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   // Per-operation dt body, unless the caller built one itself (remoteAC).
   const data = extra ?? (OPERATION_DATA[operation] ? { dt: OPERATION_DATA[operation] } : undefined);
@@ -977,8 +992,9 @@ async function performOperation(
   // FieldDelegateUA.getValue() (decompiled): "1" for operation "vehicleStatus",
   // "android" for every other operation — and PerformRO always includes this
   // field when the delegate returns non-null, which it always does. This
-  // Worker never sends vehicleStatus, so "android" is the correct constant
-  // here. Confirmed missing entirely from every request this Worker sent
+  // Snow Guard also uses the native read-only vehicleStatus operation before
+  // an unattended climate request, so retain the app's exact split here.
+  // Confirmed missing entirely from every request this Worker sent
   // before this fix — untested whether the server actually enforces it, but
   // the validated Python reference client (mitsubishi_na/api.py) always sends
   // it and that is what's been confirmed working end-to-end live.
@@ -1000,6 +1016,7 @@ async function performOperation(
       ...data,
       userAgent,
     }),
+    signal,
   });
   if (!res.ok) {
     throw new ApiError(502, `Remote operation failed: HTTP ${res.status} ${await safeText(res)}`);
@@ -1058,6 +1075,13 @@ const POLL_TIMEOUT_MS = 75000;
  * case rather than to add latency to the common one.
  */
 const PRECONDITION_POLL_TIMEOUT_MS = 20000;
+/**
+ * A VHR refresh is a read-only remote operation. It gets a short, separate
+ * deadline: its sole purpose is to establish current parked/secure evidence
+ * before an unattended climate request, never to make the climate request
+ * more likely by accepting an older report.
+ */
+const VHR_REFRESH_POLL_TIMEOUT_MS = 35_000;
 
 interface EventOutcome {
   outcome: "succeeded" | "failed" | "timeout";
@@ -1067,36 +1091,76 @@ interface EventOutcome {
   polls: number;
 }
 
+interface RemoteOperationEvent {
+  status: string | null;
+  reasonCode: string | null;
+  errorLabel: string | null;
+  operationType: string | null;
+}
+
+/** Delay that stops promptly when a bounded preflight is cancelled. */
+function waitForPollInterval(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(new Error("Operation polling aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(new Error("Operation polling aborted"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function fetchRemoteOperationEvent(
+  accessToken: string,
+  vin: string,
+  eventId: string,
+  signal?: AbortSignal,
+): Promise<RemoteOperationEvent | null> {
+  const url = BASE_URL + EP_RO_STATUS.replace("{vin}", encodeURIComponent(vin)).replace("{eventId}", encodeURIComponent(eventId));
+  const res = await fetch(url, { headers: sharedHeaders(`Bearer ${accessToken}`), signal });
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => null)) as {
+    status?: unknown;
+    reasonCode?: unknown;
+    errorLabel?: unknown;
+    operationType?: unknown;
+  } | null;
+  if (!data) return null;
+  return {
+    status: typeof data.status === "string" ? data.status : null,
+    reasonCode: typeof data.reasonCode === "string" ? data.reasonCode : null,
+    errorLabel: typeof data.errorLabel === "string" ? data.errorLabel : null,
+    operationType: typeof data.operationType === "string" ? data.operationType : null,
+  };
+}
+
 async function pollEvent(
   accessToken: string,
   vin: string,
   eventId: string,
   timeoutMs: number = POLL_TIMEOUT_MS,
   operation?: string,
+  signal?: AbortSignal,
 ): Promise<EventOutcome> {
-  const url = BASE_URL + EP_RO_STATUS.replace("{vin}", encodeURIComponent(vin)).replace("{eventId}", encodeURIComponent(eventId));
-  const headers = sharedHeaders(`Bearer ${accessToken}`);
   const deadline = Date.now() + timeoutMs;
 
   let last: EventOutcome = { outcome: "timeout", status: null, reasonCode: null, errorLabel: null, polls: 0 };
 
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await waitForPollInterval(POLL_INTERVAL_MS, signal);
     last.polls++;
 
-    const res = await fetch(url, { headers });
-    if (!res.ok) continue;
-
-    const data = (await res.json().catch(() => null)) as {
-      status?: string;
-      reasonCode?: string;
-      errorLabel?: string;
-    } | null;
+    const data = await fetchRemoteOperationEvent(accessToken, vin, eventId, signal);
     if (!data?.status) continue;
 
     last.status = data.status;
-    last.reasonCode = data.reasonCode ?? null;
-    last.errorLabel = data.errorLabel ?? null;
+    last.reasonCode = data.reasonCode;
+    last.errorLabel = data.errorLabel;
 
     const s = data.status.toLowerCase();
     if (s === "successful" || s === "success" || s === "inqueue") {
@@ -1121,6 +1185,66 @@ async function pollEvent(
 }
 
 /**
+ * Request and verify a fresh VHR after the TCU wake-up. A `vehicleStatus`
+ * operation is read-only and carries neither a PIN nor a climate payload.
+ *
+ * `inQueue` merely means the server accepted a remote operation, so it is
+ * deliberately NOT enough here. It can only acknowledge this read while a
+ * co-timestamped VHR independently proves current parked/secure evidence.
+ */
+async function refreshVehicleHealthReport(
+  env: Env,
+  accessToken: string,
+  vin: string,
+  signal?: AbortSignal,
+): Promise<Record<string, JsonValue>> {
+  const refreshRequestedAt = Date.now();
+  const submitted = await performOperation(env, accessToken, vin, null, "vehicleStatus", undefined, signal);
+  const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
+  if (typeof eventId !== "string" || !eventId) {
+    throw new ApiError(502, "Vehicle-status refresh was not acknowledged");
+  }
+
+  const deadline = Date.now() + VHR_REFRESH_POLL_TIMEOUT_MS;
+  let refreshAcknowledged = false;
+  while (Date.now() < deadline) {
+    const [eventResult, statusResult] = await Promise.allSettled([
+      fetchRemoteOperationEvent(accessToken, vin, eventId, signal),
+      fetchLiveStatus(env, accessToken, vin, signal),
+    ]);
+    if (signal?.aborted) throw new Error("Vehicle-status refresh timed out");
+
+    const event = eventResult.status === "fulfilled" ? eventResult.value : null;
+    if (event?.operationType !== null && event?.operationType !== undefined &&
+      event.operationType.toLowerCase() !== "vehiclestatus") {
+      throw new ApiError(502, "Vehicle-status refresh returned an unexpected operation");
+    }
+    const eventStatus = event?.status?.toLowerCase() ?? null;
+    if (eventStatus === "failed" || eventStatus === "failure") {
+      throw new ApiError(502, "Vehicle-status refresh was rejected");
+    }
+    // The native app can surface `inqueue` for a completed status read. It is
+    // never sufficient by itself; the fresh correlated VHR below is the
+    // actual proof. MessageDelivered remains too ambiguous to accept.
+    if (eventStatus === "successful" || eventStatus === "success" || eventStatus === "inqueue") refreshAcknowledged = true;
+
+    if (refreshAcknowledged && statusResult.status === "fulfilled") {
+      const reportAt = finiteNumber(statusResult.value.vehicle_reported_at_ms);
+      if (isFreshVhrRefreshEvidence({
+        acknowledgementStatus: eventStatus,
+        reportTimestampMs: reportAt,
+        refreshRequestedAtMs: refreshRequestedAt,
+        sampledAtMs: Date.now(),
+        maximumAgeMs: VHR_MAX_AGE_MS,
+        maximumFutureSkewMs: VHR_MAX_FUTURE_SKEW_MS,
+      })) return statusResult.value;
+    }
+    await waitForPollInterval(POLL_INTERVAL_MS, signal);
+  }
+  throw new ApiError(502, "A fresh vehicle-status report was not confirmed");
+}
+
+/**
  * Wake the TCU, then give it a moment to attach to the network.
  *
  * Best-effort: a failed/duplicate wakeup is NOT fatal (the API answers
@@ -1133,7 +1257,7 @@ async function pollEvent(
  */
 const WAKE_SETTLE_MS = 25000;
 
-async function wakeUpVehicle(accessToken: string, vin: string): Promise<void> {
+async function wakeUpVehicle(accessToken: string, vin: string, signal?: AbortSignal): Promise<void> {
   const url = BASE_URL + EP_VEHICLE_WAKEUP.replace("{vin}", encodeURIComponent(vin));
   try {
     await fetch(url, {
@@ -1146,11 +1270,13 @@ async function wakeUpVehicle(accessToken: string, vin: string): Promise<void> {
         timeStamp: String(Date.now()),
         data: {},
       }),
+      signal,
     });
-  } catch {
+  } catch (err) {
+    if (signal?.aborted) throw err;
     // Non-fatal: fall through and still attempt the command.
   }
-  await new Promise((r) => setTimeout(r, WAKE_SETTLE_MS));
+  await waitForPollInterval(WAKE_SETTLE_MS, signal);
 }
 
 /** Full command flow: login -> VIN -> wake -> PIN token -> submit -> poll to outcome. */
@@ -1200,15 +1326,27 @@ async function runCommand(
  * paying a second 25s wake settle for the stop. Neither remoteAC nor engineOff
  * takes a pinToken (see OPERATIONS_REQUIRING_PIN).
  */
-async function runClimateStart(
+interface ClimateStartOptions {
+  replaceExisting?: boolean;
+  /** A Snow Guard preflight has already completed the same-session wake. */
+  alreadyAwake?: boolean;
+  /** Preserve a capability read completed during the safety preflight. */
+  availableHvacOptions?: Set<string> | null;
+  signal?: AbortSignal;
+}
+
+async function runClimateStartWithSession(
   env: Env,
+  accessToken: string,
+  vin: string,
   request: ClimateRequest,
-  options: { replaceExisting?: boolean } = {},
+  options: ClimateStartOptions = {},
 ): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
-  const { accessToken } = await login(env);
-  const vin = await getVin(env, accessToken);
-  const extra = buildHvacExtra(request, await getAvailableHvacOptions(accessToken, vin));
-  await wakeUpVehicle(accessToken, vin);
+  const availableHvacOptions = options.availableHvacOptions === undefined
+    ? await getAvailableHvacOptions(accessToken, vin, options.signal)
+    : options.availableHvacOptions;
+  const extra = buildHvacExtra(request, availableHvacOptions);
+  if (!options.alreadyAwake) await wakeUpVehicle(accessToken, vin, options.signal);
 
   // A person changing climate settings in the dashboard reasonably expects
   // their new selection to replace the current session. An unattended guard
@@ -1216,10 +1354,10 @@ async function runClimateStart(
   // the Mitsubishi app would be a surprising and potentially unsafe action.
   if (options.replaceExisting !== false) {
     try {
-      const stopped = await performOperation(env, accessToken, vin, null, "engineOff");
+      const stopped = await performOperation(env, accessToken, vin, null, "engineOff", undefined, options.signal);
       const stopEventId = (stopped as { eventId?: unknown } | null)?.eventId;
       if (typeof stopEventId === "string" && stopEventId) {
-        await pollEvent(accessToken, vin, stopEventId, PRECONDITION_POLL_TIMEOUT_MS);
+        await pollEvent(accessToken, vin, stopEventId, PRECONDITION_POLL_TIMEOUT_MS, undefined, options.signal);
       }
     } catch {
       // Best-effort: a teardown that could not even be submitted should not block
@@ -1227,12 +1365,22 @@ async function runClimateStart(
     }
   }
 
-  const submitted = await performOperation(env, accessToken, vin, null, "remoteAC", extra);
+  const submitted = await performOperation(env, accessToken, vin, null, "remoteAC", extra, options.signal);
   const eventId = (submitted as { eventId?: unknown } | null)?.eventId;
   if (typeof eventId !== "string" || !eventId) {
     return { eventId: null, submitted, event: null };
   }
-  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId) };
+  return { eventId, submitted, event: await pollEvent(accessToken, vin, eventId, POLL_TIMEOUT_MS, undefined, options.signal) };
+}
+
+async function runClimateStart(
+  env: Env,
+  request: ClimateRequest,
+  options: ClimateStartOptions = {},
+): Promise<{ eventId: string | null; submitted: unknown; event: EventOutcome | null }> {
+  const { accessToken } = await login(env, options.signal);
+  const vin = await getVin(env, accessToken, options.signal);
+  return runClimateStartWithSession(env, accessToken, vin, request, options);
 }
 
 /**
@@ -2053,19 +2201,20 @@ function parseBatteryHealth(health: JsonValue): number | null {
 }
 
 /** Same shape as build_latest() in cron_log_status.py — kept field-identical. */
-async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Promise<Record<string, JsonValue>> {
+async function fetchLiveStatus(env: Env, accessToken: string, vin: string, signal?: AbortSignal): Promise<Record<string, JsonValue>> {
   const headers = sharedHeaders(`Bearer ${accessToken}`);
   const [stateRes, healthRes] = await Promise.all([
-    fetch(BASE_URL + EP_VEHICLE_STATE.replace("{vin}", vin), { headers }),
-    fetch(BASE_URL + EP_VEHICLE_HEALTH.replace("{vin}", vin) + "?count=1", { headers }),
+    fetch(BASE_URL + EP_VEHICLE_STATE.replace("{vin}", vin), { headers, signal }),
+    fetch(BASE_URL + EP_VEHICLE_HEALTH.replace("{vin}", vin) + "?count=1", { headers, signal }),
   ]);
   if (!stateRes.ok) throw new ApiError(502, `vehiclestate failed: HTTP ${stateRes.status} ${await safeText(stateRes)}`);
 
   const state = (await stateRes.json()) as JsonValue;
   const health = stateRes.ok && healthRes.ok ? ((await healthRes.json()) as JsonValue) : null;
+  const vhr = parseHealthCalibrationTelemetry(health);
 
   const charging = (findKey(state, "chargingControl") ?? state) as JsonValue;
-  const battery = toInt(firstPresent(charging, ["hvBatteryLife", "batteryLife"]));
+  const battery = toInt(firstPresent(charging, ["hvBatteryLife", "batteryLife"])) ?? vhr.batteryPct;
   const gasRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeFirst"])));
   const evRange = toInt(extractRange(firstPresent(charging, ["cruisingRangeSecond"])));
   let totalRange = toInt(firstPresent(charging, ["cruisingRangeCombined"]));
@@ -2073,6 +2222,7 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
 
   const tirePressureBar = health ? parseTirePressureBar(health) : {};
   const warnings = health ? parseWarnings(health) : {};
+  const vehicleDoors = vhr.vehicleStatus === null ? {} : parseDoors(vhr.vehicleStatus as JsonValue);
 
   return {
     ts: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
@@ -2080,9 +2230,9 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
     ev_range_km: evRange,
     gas_range_km: gasRange,
     total_range_km: totalRange,
-    odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])),
+    odometer_km: toInt(firstPresent(health ?? {}, ["odo", "odometer"])) ?? vhr.odometerKm,
     charging_status: chargingStatus(firstPresent(charging, ["hvChargingStatus", "chargingStatus"])),
-    plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus", "chargePlugConnected"])),
+    plugged_in: toBool(firstPresent(charging, ["hvChargingPlugStatus", "chargePlugConnected"])) ?? vhr.pluggedIn,
     time_to_full_charge_min: toInt(firstPresent(charging, ["hvTimeToFullCharge"])),
     health_reported: health !== null,
     battery_health_pct: health ? parseBatteryHealth(health) : null,
@@ -2095,6 +2245,16 @@ async function fetchLiveStatus(env: Env, accessToken: string, vin: string): Prom
       lon: toFloat(firstPresent(state, ["lon", "lng", "longitude"])),
     },
     doors: parseDoors(state),
+    // Co-timestamped VHR fields are reserved for Snow Guard's action and
+    // calibration gates. The generic dashboard fields above remain best-effort
+    // display values and must not be mistaken for fresh vehicle telemetry.
+    vehicle_reported_at_ms: vhr.reportedAtMs,
+    vehicle_battery_pct: vhr.batteryPct,
+    vehicle_plugged_in: vhr.pluggedIn,
+    vehicle_odometer_km: vhr.odometerKm,
+    vehicle_ignition_on: vhr.ignitionOn,
+    vehicle_speed_kmh: vhr.speedKmh,
+    vehicle_doors: vehicleDoors,
     headlights: parseHeadlights(state),
   };
 }
@@ -2120,9 +2280,19 @@ const SNOW_GUARD_CALIBRATION_KEY = "calibration";
 const SNOW_GUARD_TIMEZONE = "America/Halifax";
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const ECCC_GEOMET_WMS_URL = "https://geo.weather.gc.ca/geomet";
-const WEATHER_REQUEST_TIMEOUT_MS = 8_000;
+/** Independent deadlines keep one weather source from cancelling another. */
+const WEATHER_SOURCE_TIMEOUT_MS = 12_000;
+const RADAR_REQUEST_TIMEOUT_MS = 8_000;
+/** A vehicle report older than this is never safe evidence for an auto action. */
+const VHR_MAX_AGE_MS = 5 * 60_000;
+const VHR_MAX_FUTURE_SKEW_MS = 30_000;
+/** Login, the established 25-second TCU wake, and a bounded VHR evidence loop. */
+const VHR_STATUS_PREFLIGHT_TIMEOUT_MS = 75_000;
+/** A battery observation is useful only immediately after the requested cycle. */
+const POST_CYCLE_BATTERY_WINDOW_MS = 15 * 60_000;
 type SnowDecisionCode =
   | "disabled" | "no_snow" | "light_snow" | "weather_unavailable"
+  | "weather_fallback"
   | "weather_low_confidence" | "temperature_too_low" | "freezing_precipitation"
   | "radar_unconfirmed"
   | "remote_climate_reserve" | "vehicle_moving" | "vehicle_open"
@@ -2164,6 +2334,17 @@ interface SnowWeather {
   radar: SnowRadarEvidence;
 }
 
+type SnowWeatherLookup =
+  | { kind: "model"; weather: SnowWeather }
+  | { kind: "fallback"; fallback: EcccCityPageDisplay; modelFailure: SnowWeatherSourceFailure }
+  | { kind: "unavailable"; failures: SnowWeatherSourceFailure[] };
+
+class WeatherSourceError extends Error {
+  constructor(readonly failure: SnowWeatherSourceFailure) {
+    super(weatherSourceFailureMessage(failure));
+  }
+}
+
 type SnowRadarPhase = "snow" | "mixed" | "freezing" | "rain" | "none" | "unknown";
 
 interface SnowRadarEvidence {
@@ -2180,6 +2361,7 @@ interface SnowGuardDecision {
   code: SnowDecisionCode;
   summary: string;
   weather: SnowWeather | null;
+  weatherFailures?: SnowWeatherSourceFailure[];
 }
 
 interface SnowGuardRuntime {
@@ -2293,9 +2475,14 @@ function weatherObservedAt(value: unknown): { observedAt: string | null; dataAge
   // Unix API responses are seconds; Date.parse values are milliseconds.
   const observedMs = typeof value === "number" && value < 10_000_000_000 ? value * 1000 : time;
   if (!Number.isFinite(observedMs)) return { observedAt: null, dataAgeMinutes: null };
+  const observedDate = new Date(observedMs);
+  if (!Number.isFinite(observedDate.getTime())) return { observedAt: null, dataAgeMinutes: null };
+  const ageMinutes = Math.round((Date.now() - observedMs) / 60_000);
+  // A future forecast point must not masquerade as a fresh observation.
+  if (ageMinutes < -1) return { observedAt: null, dataAgeMinutes: null };
   return {
-    observedAt: new Date(observedMs).toISOString(),
-    dataAgeMinutes: Math.max(0, Math.round((Date.now() - observedMs) / 60_000)),
+    observedAt: observedDate.toISOString(),
+    dataAgeMinutes: Math.max(0, ageMinutes),
   };
 }
 
@@ -2422,7 +2609,18 @@ async function fetchSnowRadarEvidence(config: SnowGuardConfig, signal: AbortSign
   };
 }
 
-async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
+function unavailableRadarEvidence(): SnowRadarEvidence {
+  return {
+    checkedAt: new Date().toISOString(),
+    sourceAt: null,
+    dataAgeMinutes: null,
+    phase: "unknown",
+    snowRateCmH: null,
+    fresh: false,
+  };
+}
+
+async function fetchOpenMeteoSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
   const query = new URLSearchParams({
     latitude: String(config.location.latitude), longitude: String(config.location.longitude),
     timezone: SNOW_GUARD_TIMEZONE,
@@ -2431,14 +2629,18 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
     minutely_15: "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,rain,snowfall,weather_code,wind_speed_10m,wind_gusts_10m",
     forecast_minutely_15: "12",
   });
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), WEATHER_REQUEST_TIMEOUT_MS);
+  const forecastController = new AbortController();
+  const radarController = new AbortController();
+  const forecastTimeout = setTimeout(() => forecastController.abort(), WEATHER_SOURCE_TIMEOUT_MS);
+  const radarTimeout = setTimeout(() => radarController.abort(), RADAR_REQUEST_TIMEOUT_MS);
+  // A radar issue reduces confidence, but must never turn an otherwise-valid
+  // forecast into the generic weather-unavailable branch.
+  const radarPromise = fetchSnowRadarEvidence(config, radarController.signal).catch(unavailableRadarEvidence);
   try {
-    const [response, radar] = await Promise.all([
-      fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`, { signal: controller.signal }),
-      fetchSnowRadarEvidence(config, controller.signal),
-    ]);
-    if (!response.ok) throw new ApiError(502, `Weather lookup failed: HTTP ${response.status}`);
+    const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`, { signal: forecastController.signal });
+    if (!response.ok) {
+      throw new WeatherSourceError(weatherSourceFailureFromHttp("open_meteo_forecast", response.status));
+    }
     const raw = (await response.json().catch(() => null)) as {
       current?: {
         time?: unknown; temperature_2m?: unknown; relative_humidity_2m?: unknown; dew_point_2m?: unknown;
@@ -2447,7 +2649,7 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
       };
       minutely_15?: { time?: unknown; snowfall?: unknown };
     } | null;
-    if (!raw?.current) throw new ApiError(502, "Weather lookup returned no current conditions");
+    if (!raw?.current) throw new WeatherSourceError(weatherSourceFailureFromPayload("open_meteo_forecast"));
     const currentSnowCm = nonNegativeNumber(raw.current.snowfall);
     const weatherCode = finiteNumber(raw.current.weather_code);
     const index = firstForecastIndex(raw.minutely_15?.time, raw.current.time);
@@ -2462,6 +2664,10 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
     const windSpeedKmh = finiteNumber(raw.current.wind_speed_10m);
     const windGustKmh = finiteNumber(raw.current.wind_gusts_10m);
     const observed = weatherObservedAt(raw.current.time);
+    if (observed.observedAt === null || observed.dataAgeMinutes === null) {
+      throw new WeatherSourceError(weatherSourceFailureFromPayload("open_meteo_forecast"));
+    }
+    const radar = await radarPromise;
     const forecastSamples = forecastSampleCount(raw.minutely_15?.snowfall, index, 12);
     const confidence = snowWeatherConfidence({
       dataAgeMinutes: observed.dataAgeMinutes,
@@ -2482,11 +2688,74 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
       radar,
     };
   } catch (err) {
-    if (err instanceof ApiError) throw err;
-    throw new ApiError(502, "Weather lookup timed out or was unavailable");
+    if (err instanceof WeatherSourceError) throw err;
+    throw new WeatherSourceError(weatherSourceFailureFromTransport("open_meteo_forecast", forecastController.signal.aborted));
+  } finally {
+    clearTimeout(forecastTimeout);
+    clearTimeout(radarTimeout);
+    radarController.abort();
+  }
+}
+
+async function fetchEcccCityPageFallback(): Promise<EcccCityPageDisplay> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WEATHER_SOURCE_TIMEOUT_MS);
+  try {
+    const response = await fetch(ECCC_HALIFAX_CITY_PAGE_URL, { signal: controller.signal });
+    if (!response.ok) throw new WeatherSourceError(weatherSourceFailureFromHttp("eccc_citypage", response.status));
+    const fallback = parseEcccCityPageDisplay(await response.json().catch(() => null));
+    if (!fallback) throw new WeatherSourceError(weatherSourceFailureFromPayload("eccc_citypage"));
+    if (!ecccCityPageIsFresh(fallback)) {
+      throw new WeatherSourceError({ source: "eccc_citypage", kind: "stale", httpStatus: null });
+    }
+    return fallback;
+  } catch (err) {
+    if (err instanceof WeatherSourceError) throw err;
+    throw new WeatherSourceError(weatherSourceFailureFromTransport("eccc_citypage", controller.signal.aborted));
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function weatherFailureFromUnknown(value: unknown, source: SnowWeatherSourceFailure["source"]): SnowWeatherSourceFailure {
+  return value instanceof WeatherSourceError
+    ? value.failure
+    : weatherSourceFailureFromTransport(source, false);
+}
+
+/**
+ * Start both independent sources together. A valid model result returns as
+ * soon as it is ready; City Page is awaited only when the model fails and is
+ * strictly a display fallback, never an action input.
+ */
+async function lookupSnowWeather(config: SnowGuardConfig): Promise<SnowWeatherLookup> {
+  const city = fetchEcccCityPageFallback().then(
+    (value) => ({ ok: true as const, value }),
+    (reason) => ({ ok: false as const, reason }),
+  );
+  try {
+    return { kind: "model", weather: await fetchOpenMeteoSnowWeather(config) };
+  } catch (reason) {
+    const modelFailure = weatherFailureFromUnknown(reason, "open_meteo_forecast");
+    const cityResult = await city;
+    return cityResult.ok
+      ? { kind: "fallback", fallback: cityResult.value, modelFailure }
+      : { kind: "unavailable", failures: [modelFailure, weatherFailureFromUnknown(cityResult.reason, "eccc_citypage")] };
+  }
+}
+
+function cityPageFallbackSummary(fallback: EcccCityPageDisplay, modelFailure: SnowWeatherSourceFailure): string {
+  const condition = fallback.condition ?? "conditions unavailable";
+  const temperature = fallback.temperatureC === null ? "" : `, ${Math.round(fallback.temperatureC)}°C`;
+  const observedAt = fallback.observedAt ? Date.parse(fallback.observedAt) : Number.NaN;
+  const ageMinutes = Number.isFinite(observedAt) ? Math.max(0, Math.round((Date.now() - observedAt) / 60_000)) : null;
+  const age = ageMinutes === null ? "with an unknown observation age" : `observed ${ageMinutes} min ago`;
+  return `${weatherSourceFailureMessage(modelFailure)} ECCC Halifax reports ${condition}${temperature}, ${age}. Automatic Snow Guard is paused; no vehicle action was sent.`;
+}
+
+function weatherUnavailableSummary(failures: SnowWeatherSourceFailure[]): string {
+  const details = failures.map(weatherSourceFailureMessage).join(" ");
+  return `Live weather could not be checked. ${details} Automatic Snow Guard is paused; no vehicle action was sent.`;
 }
 
 function normaliseSnowGuardConfig(input: unknown, current = DEFAULT_SNOW_GUARD_CONFIG): SnowGuardConfig {
@@ -2524,8 +2793,13 @@ function normaliseSnowGuardConfig(input: unknown, current = DEFAULT_SNOW_GUARD_C
   };
 }
 
-function snowDecision(code: SnowDecisionCode, summary: string, weather: SnowWeather | null): SnowGuardDecision {
-  return { at: new Date().toISOString(), code, summary, weather };
+function snowDecision(
+  code: SnowDecisionCode,
+  summary: string,
+  weather: SnowWeather | null,
+  weatherFailures?: SnowWeatherSourceFailure[],
+): SnowGuardDecision {
+  return { at: new Date().toISOString(), code, summary, weather, ...(weatherFailures?.length ? { weatherFailures } : {}) };
 }
 
 function snowWeatherSummary(weather: SnowWeather): string {
@@ -2700,51 +2974,153 @@ export class SnowGuard {
     snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases, now);
     snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
     snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases, now);
+    // First persist the user outcome. The optional measurement below must
+    // never cause a one-tap feedback response to be lost or rejected.
     await this.save(snapshot);
+    if (await this.capturePostCycleBattery(target, now)) {
+      snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases, now);
+      snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+      snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases, now);
+      await this.save(snapshot);
+    }
     return snapshot;
+  }
+
+  /**
+   * Take one bounded, read-only post-cycle measurement for calibration.
+   * It deliberately never affects an action decision, never retries, and is
+   * discarded unless the feedback arrives near the requested cycle end.
+   */
+  private async capturePostCycleBattery(target: SnowCalibrationCase, now: number): Promise<boolean> {
+    const eligibleAt = Date.parse(target.eligibleAt);
+    const startTelemetryAt = Date.parse(target.batteryTelemetryAtStart ?? "");
+    if (
+      target.pluggedInAtStart !== false ||
+      !Number.isFinite(eligibleAt) ||
+      !Number.isFinite(startTelemetryAt) ||
+      now < eligibleAt ||
+      now > eligibleAt + POST_CYCLE_BATTERY_WINDOW_MS
+    ) return false;
+
+    const captureStartedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7_000);
+    try {
+      const { accessToken } = await login(this.env, controller.signal);
+      const vin = await getVin(this.env, accessToken, controller.signal);
+      const latest = await fetchLiveStatus(this.env, accessToken, vin, controller.signal);
+      const receivedAt = Date.now();
+      const reportAt = finiteNumber(latest.vehicle_reported_at_ms);
+      const afterBattery = finiteNumber(latest.vehicle_battery_pct);
+      const afterPlugged = latest.vehicle_plugged_in === true ? true : latest.vehicle_plugged_in === false ? false : null;
+      const afterOdometer = finiteNumber(latest.vehicle_odometer_km);
+      const ignitionOn = latest.vehicle_ignition_on === true ? true : latest.vehicle_ignition_on === false ? false : null;
+      const speed = finiteNumber(latest.vehicle_speed_kmh);
+      // All post values come from one timestamped VHR, after the requested
+      // cycle. A late/cached partial response is not a scientific sample.
+      if (
+        reportAt === null ||
+        !telemetryTimestampIsRecent(reportAt, receivedAt, VHR_MAX_AGE_MS, VHR_MAX_FUTURE_SKEW_MS) ||
+        reportAt < eligibleAt ||
+        reportAt > eligibleAt + POST_CYCLE_BATTERY_WINDOW_MS ||
+        reportAt <= startTelemetryAt ||
+        reportAt < captureStartedAt - VHR_MAX_FUTURE_SKEW_MS ||
+        afterBattery === null ||
+        afterPlugged !== false ||
+        afterOdometer === null ||
+        ignitionOn !== false ||
+        speed === null || speed > 0
+      ) return false;
+
+      const candidate = {
+        ...target,
+        batteryPctAfter: afterBattery,
+        pluggedInAfter: afterPlugged,
+        odometerKmAfter: afterOdometer,
+        batteryTelemetryAt: new Date(reportAt).toISOString(),
+        batteryMeasuredAt: new Date(receivedAt).toISOString(),
+      };
+      const delta = screenedReportedBatteryDeltaPct(candidate);
+      if (delta === null) return false;
+      Object.assign(target, candidate, { batteryDeltaPct: delta });
+      return true;
+    } catch {
+      // Feedback remains durable even when the vehicle is asleep or upstream
+      // status is unavailable. Do not turn a read-only sample into a retry.
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   private async dryRun(): Promise<SnowGuardSnapshot> {
     const snapshot = await this.snapshot();
-    try {
-      const weather = await fetchSnowWeather(snapshot.config);
-      // A manual check is informational and never reaches the vehicle. It is
-      // useful before opt-in, so report the weather even while automation is
-      // disabled instead of making the user enable the feature just to test it.
-      if (!snapshot.config.enabled) {
-        snapshot.runtime.lastDecision = snowDecision(
-          "disabled",
-          `${snowWeatherSummary(weather)}. Snow Guard is off; no vehicle action was sent.`,
-          weather,
-        );
-        await this.save(snapshot);
-        return snapshot;
-      }
-      const plan = snowActionPlan(weather);
-      const code: SnowDecisionCode = plan.actionable ? "climate_pending" : snowNoActionCode(weather);
-      const summary = plan.actionable
-        ? `${plan.summary} This check is read-only; no vehicle action was sent.`
-        : plan.summary;
-      snapshot.runtime.lastDecision = snowDecision(code, summary, weather);
-      await this.save(snapshot);
-      return snapshot;
-    } catch {
-      snapshot.runtime.lastDecision = snowDecision("weather_unavailable", "Weather could not be checked. No vehicle action was sent.", null);
+    const lookup = await lookupSnowWeather(snapshot.config);
+    if (lookup.kind === "fallback") {
+      snapshot.runtime.lastDecision = snowDecision(
+        "weather_fallback",
+        cityPageFallbackSummary(lookup.fallback, lookup.modelFailure),
+        null,
+        [lookup.modelFailure],
+      );
       await this.save(snapshot);
       return snapshot;
     }
+    if (lookup.kind === "unavailable") {
+      snapshot.runtime.lastDecision = snowDecision(
+        "weather_unavailable",
+        weatherUnavailableSummary(lookup.failures),
+        null,
+        lookup.failures,
+      );
+      await this.save(snapshot);
+      return snapshot;
+    }
+    const weather = lookup.weather;
+    // A manual check is informational and never reaches the vehicle. It is
+    // useful before opt-in, so report the weather even while automation is
+    // disabled instead of making the user enable the feature just to test it.
+    if (!snapshot.config.enabled) {
+      snapshot.runtime.lastDecision = snowDecision(
+        "disabled",
+        `${snowWeatherSummary(weather)}. Snow Guard is off; no vehicle action was sent.`,
+        weather,
+      );
+      await this.save(snapshot);
+      return snapshot;
+    }
+    const plan = snowActionPlan(weather);
+    const code: SnowDecisionCode = plan.actionable ? "climate_pending" : snowNoActionCode(weather);
+    const summary = plan.actionable
+      ? `${plan.summary} This check is read-only; no vehicle action was sent.`
+      : plan.summary;
+    snapshot.runtime.lastDecision = snowDecision(code, summary, weather);
+    await this.save(snapshot);
+    return snapshot;
   }
 
   private async tick(): Promise<SnowGuardSnapshot> {
     const snapshot = await this.snapshot();
     if (!snapshot.config.enabled) return snapshot;
 
-    let weather: SnowWeather;
-    try {
-      weather = await fetchSnowWeather(snapshot.config);
-    } catch {
-      return this.record(snapshot, snowDecision("weather_unavailable", "Weather could not be checked. No vehicle action was sent.", null));
+    const lookup = await lookupSnowWeather(snapshot.config);
+    if (lookup.kind === "fallback") {
+      return this.record(snapshot, snowDecision(
+        "weather_fallback",
+        cityPageFallbackSummary(lookup.fallback, lookup.modelFailure),
+        null,
+        [lookup.modelFailure],
+      ));
     }
+    if (lookup.kind === "unavailable") {
+      return this.record(snapshot, snowDecision(
+        "weather_unavailable",
+        weatherUnavailableSummary(lookup.failures),
+        null,
+        lookup.failures,
+      ));
+    }
+    const weather = lookup.weather;
 
     const plan = snowActionPlan(weather);
     if (!plan.actionable) {
@@ -2768,7 +3144,6 @@ export class SnowGuard {
     }
 
     const now = Date.now();
-    const nowIso = new Date(now).toISOString();
     const lastDriveCheckAt = snapshot.runtime.lastDriveCheckAt ? Date.parse(snapshot.runtime.lastDriveCheckAt) : Number.NaN;
     if (
       snapshot.runtime.automatedStartsSinceDrive >= 1 &&
@@ -2782,16 +3157,46 @@ export class SnowGuard {
     }
 
     let latest: Record<string, JsonValue>;
+    let statusCheckedAt: number;
+    let accessToken: string;
+    let vin: string;
+    let availableHvacOptions: Set<string> | null;
+    const statusController = new AbortController();
+    const statusTimeout = setTimeout(() => statusController.abort(), VHR_STATUS_PREFLIGHT_TIMEOUT_MS);
     try {
-      const { accessToken } = await login(this.env);
-      const vin = await getVin(this.env, accessToken);
-      latest = await fetchLiveStatus(this.env, accessToken, vin);
+      const session = await login(this.env, statusController.signal);
+      accessToken = session.accessToken;
+      vin = await getVin(this.env, accessToken, statusController.signal);
+      // Worker policy deliberately wakes before obtaining action evidence.
+      // The native status screen can read without an SMS, but an unattended
+      // climate action needs a report sampled after the car is awake, not a
+      // snapshot that could change during the normal 25-second wake interval.
+      const hvacOptions = getAvailableHvacOptions(accessToken, vin, statusController.signal);
+      await wakeUpVehicle(accessToken, vin, statusController.signal);
+      latest = await refreshVehicleHealthReport(this.env, accessToken, vin, statusController.signal);
+      statusCheckedAt = Date.now();
+      availableHvacOptions = await hvacOptions;
     } catch {
-      return this.record(snapshot, snowDecision("climate_error", "Vehicle status could not be confirmed. No climate action was sent.", weather));
+      return this.record(snapshot, snowDecision(
+        "vehicle_status_unknown",
+        "A current vehicle-status report could not be obtained, so Snow Guard will not guess that it is parked and secure. No climate action was sent.",
+        weather,
+      ));
+    } finally {
+      clearTimeout(statusTimeout);
     }
 
-    snapshot.runtime.lastDriveCheckAt = nowIso;
-    const odometerKm = finiteNumber(latest.odometer_km);
+    const vehicleReportedAt = finiteNumber(latest.vehicle_reported_at_ms);
+    if (!telemetryTimestampIsRecent(vehicleReportedAt, statusCheckedAt, VHR_MAX_AGE_MS, VHR_MAX_FUTURE_SKEW_MS)) {
+      return this.record(snapshot, snowDecision(
+        "vehicle_status_unknown",
+        "Vehicle status is not backed by a fresh timestamped report; Snow Guard will not guess that it is parked and secure. No vehicle action was sent.",
+        weather,
+      ));
+    }
+
+    snapshot.runtime.lastDriveCheckAt = new Date(statusCheckedAt).toISOString();
+    const odometerKm = finiteNumber(latest.vehicle_odometer_km);
     if (
       snapshot.runtime.automatedStartsSinceDrive >= 1 &&
       snapshot.runtime.lastActionOdometerKm !== null &&
@@ -2808,42 +3213,64 @@ export class SnowGuard {
       );
     }
 
-    const speed = finiteNumber(latest.speed_kmh);
-    if (latest.ignition_on === true || (speed !== null && speed > 0)) {
+    const ignitionOn = latest.vehicle_ignition_on === true ? true : latest.vehicle_ignition_on === false ? false : null;
+    const speed = finiteNumber(latest.vehicle_speed_kmh);
+    if (ignitionOn === true || (speed !== null && speed > 0)) {
       return this.record(snapshot, snowDecision("vehicle_moving", "Vehicle appears to be in use. No climate action was sent.", weather));
     }
-    const doors = latest.doors;
+    const doors = latest.vehicle_doors;
     if (doors !== null && typeof doors === "object" && !Array.isArray(doors) && Object.values(doors).some(isOpenDoorValue)) {
       return this.record(snapshot, snowDecision("vehicle_open", "A vehicle access point is reported open. No climate action was sent.", weather));
     }
     const requiredDoors = ["front_left", "front_right", "rear_left", "rear_right"];
     const doorState = doors !== null && typeof doors === "object" && !Array.isArray(doors) ? doors as Record<string, JsonValue> : null;
-    if (latest.ignition_on !== false || !doorState || requiredDoors.some((key) => doorState[key] !== "closed")) {
+    if (ignitionOn !== false || speed === null || !doorState || requiredDoors.some((key) => doorState[key] !== "closed")) {
       return this.record(snapshot, snowDecision(
         "vehicle_status_unknown",
-        "Vehicle state is incomplete or stale; Snow Guard will not guess that it is parked and secure. No vehicle action was sent.",
+        "Fresh vehicle status is incomplete; Snow Guard will not guess that it is parked and secure. No vehicle action was sent.",
         weather,
       ));
     }
-    if (snapshot.config.requirePlugged && latest.plugged_in !== true) {
+    const pluggedIn = latest.vehicle_plugged_in === true ? true : latest.vehicle_plugged_in === false ? false : null;
+    if (snapshot.config.requirePlugged && pluggedIn !== true) {
       return this.record(snapshot, snowDecision("not_plugged", "Vehicle is not reported plugged in. No climate action was sent.", weather));
     }
-    const batteryPct = finiteNumber(latest.battery_pct);
+    const batteryPct = finiteNumber(latest.vehicle_battery_pct);
     if (batteryPct === null) {
       return this.record(snapshot, snowDecision("battery_unknown", "Battery level was not reported. No climate action was sent.", weather));
     }
     if (batteryPct < snapshot.config.minBatteryPct) {
       return this.record(snapshot, snowDecision("battery_low", `Battery is ${Math.round(batteryPct)}%; Snow Guard requires ${snapshot.config.minBatteryPct}% or more.`, weather));
     }
-    const pluggedIn = latest.plugged_in === true ? true : latest.plugged_in === false ? false : null;
-
+    // The preflight woke the TCU before requesting this VHR. Recheck its
+    // source timestamp immediately before reserving the next operation; the
+    // same session already has HVAC capability data, so remoteAC follows
+    // without another login or 25-second wake interval.
+    const actionHandoffAt = Date.now();
+    if (!telemetryTimestampIsRecent(vehicleReportedAt, actionHandoffAt, VHR_MAX_AGE_MS, VHR_MAX_FUTURE_SKEW_MS)) {
+      return this.record(snapshot, snowDecision(
+        "vehicle_status_unknown",
+        "Vehicle-status evidence became too old before the climate hand-off. No climate action was sent.",
+        weather,
+      ));
+    }
     // Reserve the sole automatic command before the remote request. A timeout
     // must not cause another automated start that can consume the vehicle's
     // consecutive remote-climate allowance.
-    snapshot.runtime.lastAttemptAt = nowIso;
+    snapshot.runtime.lastAttemptAt = new Date(actionHandoffAt).toISOString();
     snapshot.runtime.automatedStartsSinceDrive = 1;
     snapshot.runtime.lastActionOdometerKm = odometerKm;
     await this.save(snapshot);
+    // A storage stall must not turn a valid fresh report into a late action.
+    if (!telemetryTimestampIsRecent(vehicleReportedAt, Date.now(), VHR_MAX_AGE_MS, VHR_MAX_FUTURE_SKEW_MS)) {
+      snapshot.runtime.automatedStartsSinceDrive = 0;
+      snapshot.runtime.lastActionOdometerKm = null;
+      return this.record(snapshot, snowDecision(
+        "vehicle_status_unknown",
+        "Vehicle-status evidence became too old before the climate request. No climate action was sent.",
+        weather,
+      ));
+    }
 
     const minutes = plan.minutes;
     const request: ClimateRequest = {
@@ -2857,8 +3284,14 @@ export class SnowGuard {
     };
     try {
       // This is the vital behavioural split from an interactive update:
-      // automated weather logic never stops a currently running session.
-      const result = await runClimateStart(this.env, request, { replaceExisting: false });
+      // automated weather logic never stops a currently running session. It
+      // also reuses the status-preflight session so remoteAC is submitted
+      // directly after the final fresh-VHR check.
+      const result = await runClimateStartWithSession(this.env, accessToken, vin, request, {
+        replaceExisting: false,
+        alreadyAwake: true,
+        availableHvacOptions,
+      });
       if (result.event?.outcome === "failed") {
         const activeElsewhere = result.event.errorLabel === "RO_FAILURE_ALREADY_STARTED";
         return this.record(
@@ -2873,20 +3306,29 @@ export class SnowGuard {
           { minutes, outcome: result.event.outcome, errorLabel: result.event.errorLabel, batteryPct, pluggedIn },
         );
       }
-      // runClimateStart includes wake-up and confirmation polling. Start the
-      // feedback clock only after the request has returned, never from the
-      // earlier weather/status sample.
-      const climateSubmittedAt = new Date().toISOString();
+      // Start the feedback clock only after the request has returned, never
+      // from the earlier weather/status sample.
+      const climateSubmittedAtMs = Date.now();
+      const climateSubmittedAt = new Date(climateSubmittedAtMs).toISOString();
       snapshot.runtime.lastRunAt = climateSubmittedAt;
       const outcome = result.event?.outcome ?? "submitted";
       if (outcome === "succeeded") {
+        // The action itself was allowed only with a current VHR. For the
+        // optional battery study, require that same VHR to predate submission
+        // and remain within its five-minute source-time bound.
+        const hasScreenableStartTelemetry =
+          vehicleReportedAt !== null &&
+          vehicleReportedAt <= climateSubmittedAtMs &&
+          climateSubmittedAtMs - vehicleReportedAt <= VHR_MAX_AGE_MS;
         snapshot.calibrationCases = retainSnowCalibrationCases([
           newSnowCalibrationCase({
             id: crypto.randomUUID(),
             actionAt: climateSubmittedAt,
             minutes,
-            batteryPctAtStart: batteryPct,
-            pluggedInAtStart: pluggedIn,
+            batteryPctAtStart: hasScreenableStartTelemetry ? batteryPct : null,
+            pluggedInAtStart: hasScreenableStartTelemetry ? pluggedIn : null,
+            odometerKmAtStart: hasScreenableStartTelemetry ? odometerKm : null,
+            ...(hasScreenableStartTelemetry ? { batteryTelemetryAtStart: new Date(vehicleReportedAt).toISOString() } : {}),
             weather: snowCalibrationWeather(weather),
           }),
           ...snapshot.calibrationCases,

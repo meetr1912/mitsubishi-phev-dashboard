@@ -31,6 +31,17 @@ export interface SnowCalibrationCase {
   minutes: 20 | 30;
   batteryPctAtStart: number | null;
   pluggedInAtStart: boolean | null;
+  odometerKmAtStart: number | null;
+  /** Timestamp from the co-timestamped Mitsubishi VHR report, not fetch time. */
+  batteryTelemetryAtStart?: string;
+  batteryPctAfter?: number | null;
+  pluggedInAfter?: boolean | null;
+  odometerKmAfter?: number | null;
+  /** Timestamp from the later co-timestamped Mitsubishi VHR report. */
+  batteryTelemetryAt?: string;
+  batteryMeasuredAt?: string;
+  /** Present only after strict source-time, unplugged, and no-odo-change screening. */
+  batteryDeltaPct?: number | null;
   weather: SnowCalibrationWeather;
   outcome?: SnowFeedbackOutcome;
   feedbackAt?: string;
@@ -49,6 +60,12 @@ export interface SnowCalibrationSummary {
   partial: number;
   noBenefit: number;
   usefulRate: number | null;
+  /**
+   * Strictly screened observations only. They are reported battery changes,
+   * not a vehicle energy measurement.
+   */
+  screenedBatterySamples: number;
+  meanScreenedBatteryDeltaPct: number | null;
   minimumSample: number;
   readyForReview: boolean;
 }
@@ -67,19 +84,68 @@ export function snowFeedbackPrompt(cases: readonly SnowCalibrationCase[], now = 
   return eligible ? { eventId: eligible.id, actionAt: eligible.actionAt, minutes: eligible.minutes } : null;
 }
 
+/**
+ * A battery percentage is not an energy meter. This conservative comparison
+ * is retained only as a screened reported observation: both co-timestamped
+ * reports must be time-valid, unplugged, and show no reported odometer change.
+ * A missing or ambiguous value produces no result rather than a guessed delta.
+ */
+export function screenedReportedBatteryDeltaPct(sample: Pick<SnowCalibrationCase,
+  "actionAt" | "batteryPctAtStart" | "pluggedInAtStart" | "odometerKmAtStart" | "batteryTelemetryAtStart" |
+  "batteryPctAfter" | "pluggedInAfter" | "odometerKmAfter" | "batteryTelemetryAt" |
+  "batteryMeasuredAt" | "eligibleAt"
+>): number | null {
+  const startBattery = sample.batteryPctAtStart;
+  const afterBattery = sample.batteryPctAfter;
+  const startOdometer = sample.odometerKmAtStart;
+  const afterOdometer = sample.odometerKmAfter;
+  const startTelemetryAt = Date.parse(sample.batteryTelemetryAtStart ?? "");
+  const afterTelemetryAt = Date.parse(sample.batteryTelemetryAt ?? "");
+  const measuredAt = Date.parse(sample.batteryMeasuredAt ?? "");
+  const eligibleAt = Date.parse(sample.eligibleAt);
+  const actionAt = Date.parse(sample.actionAt);
+  if (
+    sample.pluggedInAtStart !== false ||
+    sample.pluggedInAfter !== false ||
+    typeof startBattery !== "number" || !Number.isFinite(startBattery) || startBattery < 0 || startBattery > 100 ||
+    typeof afterBattery !== "number" || !Number.isFinite(afterBattery) || afterBattery < 0 || afterBattery > 100 ||
+    typeof startOdometer !== "number" || !Number.isFinite(startOdometer) || startOdometer < 0 ||
+    typeof afterOdometer !== "number" || !Number.isFinite(afterOdometer) || afterOdometer < 0 ||
+    startOdometer !== afterOdometer ||
+    !Number.isFinite(startTelemetryAt) ||
+    !Number.isFinite(afterTelemetryAt) ||
+    !Number.isFinite(measuredAt) ||
+    !Number.isFinite(eligibleAt) ||
+    !Number.isFinite(actionAt) ||
+    startTelemetryAt > actionAt ||
+    actionAt - startTelemetryAt > 5 * 60_000 ||
+    afterTelemetryAt < eligibleAt ||
+    afterTelemetryAt > eligibleAt + 15 * 60_000 ||
+    afterTelemetryAt <= startTelemetryAt ||
+    measuredAt < afterTelemetryAt
+  ) return null;
+  return Math.round((afterBattery - startBattery) * 10) / 10;
+}
+
 export function summariseSnowCalibration(cases: readonly SnowCalibrationCase[]): SnowCalibrationSummary {
   let clear = 0;
   let partial = 0;
   let noBenefit = 0;
+  const screenedBatteryDeltas: number[] = [];
   for (const item of cases) {
     if (item.outcome === "clear") clear += 1;
     if (item.outcome === "partial") partial += 1;
     if (item.outcome === "no_benefit") noBenefit += 1;
+    const screenedDelta = screenedReportedBatteryDeltaPct(item);
+    if (screenedDelta !== null) screenedBatteryDeltas.push(screenedDelta);
   }
   const responses = clear + partial + noBenefit;
   // A partial result counts as half a useful outcome. This is transparent
   // evidence for review, not an automatic policy adjustment.
   const usefulRate = responses ? Math.round(((clear + partial * 0.5) / responses) * 100) / 100 : null;
+  const meanScreenedBatteryDeltaPct = screenedBatteryDeltas.length
+    ? Math.round((screenedBatteryDeltas.reduce((total, value) => total + value, 0) / screenedBatteryDeltas.length) * 10) / 10
+    : null;
   return {
     eligibleActions: cases.length,
     responses,
@@ -87,6 +153,8 @@ export function summariseSnowCalibration(cases: readonly SnowCalibrationCase[]):
     partial,
     noBenefit,
     usefulRate,
+    screenedBatterySamples: screenedBatteryDeltas.length,
+    meanScreenedBatteryDeltaPct,
     minimumSample: SNOW_CALIBRATION_MINIMUM_SAMPLE,
     readyForReview: responses >= SNOW_CALIBRATION_MINIMUM_SAMPLE,
   };

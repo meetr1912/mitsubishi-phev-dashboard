@@ -1540,7 +1540,9 @@
     var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
     if (!key) return { ok: false, status: 401, body: { error: "Unlock required" }, transportError: null };
     var controller = window.AbortController ? new AbortController() : null;
-    var timeout = controller ? setTimeout(function () { controller.abort(); }, 12000) : null;
+    // A live primary forecast plus independent ECCC fallback can legitimately
+    // need more than the old 12-second browser budget on a slow connection.
+    var timeout = controller ? setTimeout(function () { controller.abort(); }, 16000) : null;
     try {
       var res = await fetch(CONFIG.WORKER_URL + path, {
         method: method,
@@ -1572,7 +1574,7 @@
     if (result.status === 502 || result.status === 503) {
       return "Snow Guard is deploying or unavailable on the relay. Retry shortly; no vehicle action was sent.";
     }
-    if (result.transportError === "timeout") return "Snow Guard did not respond within 12 seconds. Retry; no vehicle action was sent.";
+    if (result.transportError === "timeout") return "Snow Guard did not respond within 16 seconds. Retry; no vehicle action was sent.";
     if (result.transportError === "network") return "Snow Guard could not reach the command relay. Check your connection, then retry.";
     if (result.body && typeof result.body.error === "string" && result.body.error) {
       return "Snow Guard: " + result.body.error;
@@ -1589,7 +1591,7 @@
   function snowGuardKind(code) {
     if (code === "climate_started") return "good";
     if (code === "climate_pending" || code === "light_snow" || code === "remote_climate_reserve" ||
-      code === "weather_low_confidence" || code === "temperature_too_low" || code === "freezing_precipitation" ||
+      code === "weather_low_confidence" || code === "weather_fallback" || code === "temperature_too_low" || code === "freezing_precipitation" ||
       code === "radar_unconfirmed" || code === "outside_confirmation_required" || code === "cold_engine_consent_required" || code === "vehicle_status_unknown") return "caution";
     if (code === "weather_unavailable" || code === "climate_error" || code === "climate_rejected") return "error";
     return "";
@@ -1620,8 +1622,18 @@
       return;
     }
     var useful = typeof calibration.usefulRate === "number" ? Math.round(calibration.usefulRate * 100) + "% useful" : "outcomes logged";
+    var batteryNote = "";
+    if (typeof calibration.screenedBatterySamples === "number" && calibration.screenedBatterySamples > 0) {
+      var count = calibration.screenedBatterySamples;
+      var sampleText = count + " screened reported battery " + (count === 1 ? "sample" : "samples");
+      if (typeof calibration.meanScreenedBatteryDeltaPct === "number") {
+        var delta = calibration.meanScreenedBatteryDeltaPct;
+        sampleText += " · avg reported change " + (delta > 0 ? "+" : "") + delta.toFixed(1) + " points";
+      }
+      batteryNote = " · " + sampleText;
+    }
     snowGuardCalibrationEl.hidden = false;
-    snowGuardCalibrationEl.textContent = calibration.responses + " outcomes: " + calibration.clear + " clear, " + calibration.partial + " partial, " + calibration.noBenefit + " no benefit · " + useful + ". " +
+    snowGuardCalibrationEl.textContent = calibration.responses + " outcomes: " + calibration.clear + " clear, " + calibration.partial + " partial, " + calibration.noBenefit + " no benefit · " + useful + batteryNote + ". " +
       (calibration.readyForReview ? "Enough evidence for a threshold review." : (calibration.minimumSample - calibration.responses) + " more before threshold review.");
   }
 
