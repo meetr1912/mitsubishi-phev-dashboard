@@ -17,6 +17,9 @@
  */
 
 import { mqttDiscoverOperations } from "./mqtt";
+import { SerialMutationQueue } from "./serial-mutation-queue";
+import { snowAdhesionRisk, summarizeSnowSeverity, type SnowAdhesionRisk, type SnowSeverity } from "./snow-guard-policy";
+import { CORS_ALLOW_METHODS, UPSTREAM_RESPONSE_WITHHELD } from "./worker-safety";
 
 // ---------------------------------------------------------------------------
 // Constants (all confirmed from the decompiled app / const.py)
@@ -433,7 +436,7 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   // Snow Guard saves use PUT. Omitting it makes browsers reject the preflight
   // before the authenticated request ever reaches the Worker.
-  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
+  "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
   "Access-Control-Allow-Headers": "Content-Type, X-Dashboard-Key",
   "Access-Control-Max-Age": "86400",
 };
@@ -1696,7 +1699,7 @@ async function safeText(res: Response): Promise<string> {
   // contain account, vehicle, or location data. None of the dashboard paths
   // need the raw text to recover, so never echo it to the browser or logs.
   void res;
-  return "<upstream response withheld>";
+  return UPSTREAM_RESPONSE_WITHHELD;
 }
 
 // ---------------------------------------------------------------------------
@@ -2095,10 +2098,6 @@ const SNOW_GUARD_EVENTS_KEY = "events";
 const SNOW_GUARD_TIMEZONE = "America/Halifax";
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
 const WEATHER_REQUEST_TIMEOUT_MS = 8_000;
-const SNOW_WEATHER_CODES = new Set([71, 73, 75, 77, 85, 86]);
-
-type SnowSeverity = "none" | "light" | "moderate" | "heavy";
-type SnowAdhesionRisk = "low" | "moderate" | "high";
 type SnowDecisionCode =
   | "disabled" | "no_snow" | "light_snow" | "weather_unavailable"
   | "remote_climate_reserve" | "vehicle_moving" | "vehicle_open"
@@ -2192,36 +2191,6 @@ function firstForecastIndex(times: unknown, currentTime: unknown): number {
   if (!Array.isArray(times) || typeof currentTime !== "string") return 0;
   const index = times.findIndex((time) => typeof time === "string" && time >= currentTime);
   return index < 0 ? 0 : index;
-}
-
-function summarizeSnowSeverity(
-  temperatureC: number | null, currentSnowCm: number, nextHourSnowCm: number,
-  nextThreeHoursSnowCm: number, weatherCode: number | null,
-): SnowSeverity {
-  // Above this temperature the useful outcome is generally rain/slush, not
-  // enough to justify an unattended traction-battery climate cycle.
-  if (temperatureC === null || temperatureC > 2.5) return "none";
-  const currentSnowSignal = currentSnowCm >= 0.05 || (weatherCode !== null && SNOW_WEATHER_CODES.has(weatherCode));
-  const nearTermSnow = Math.max(currentSnowSignal ? 0.3 : 0, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm);
-  if (nearTermSnow < 0.3) return "none";
-  if (nearTermSnow < 1.5) return "light";
-  if (nearTermSnow < 4) return "moderate";
-  return "heavy";
-}
-
-function snowAdhesionRisk(
-  temperatureC: number | null,
-  nextHourSnowCm: number,
-  nextThreeHoursSnowCm: number,
-  windSpeedKmh: number | null,
-): SnowAdhesionRisk {
-  // Cold, dry snow often brushes off. Near freezing, denser wet snow is more
-  // likely to bond to windshield glass and wiper hardware.
-  if (temperatureC === null || nextThreeHoursSnowCm < 0.3) return "low";
-  if (temperatureC >= -2 && temperatureC <= 1.5 && nextHourSnowCm >= 0.4) return "high";
-  if (nextHourSnowCm >= 1.5 || (windSpeedKmh !== null && windSpeedKmh >= 30 && nextHourSnowCm >= 0.5)) return "high";
-  if (temperatureC <= -8 && nextHourSnowCm < 1) return "low";
-  return "moderate";
 }
 
 async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
@@ -2326,21 +2295,12 @@ export class SnowGuard {
   // DO requests may interleave after an await. Serialising mutations prevents
   // a manual disable from being overwritten by an in-flight cron tick and
   // guarantees that two ticks cannot start climate twice.
-  private mutationTail: Promise<void> = Promise.resolve();
+  private readonly mutations = new SerialMutationQueue();
 
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
   ) {}
-
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.mutationTail.then(operation, operation);
-    this.mutationTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
 
   private async snapshot(): Promise<SnowGuardSnapshot> {
     const [storedConfig, storedRuntime, storedEvents] = await Promise.all([
@@ -2555,7 +2515,7 @@ export class SnowGuard {
       } catch {
         return json({ success: false, error: "Invalid JSON body" }, 400);
       }
-      const snapshot = await this.enqueue(async () => {
+      const snapshot = await this.mutations.enqueue(async () => {
         const current = await this.snapshot();
         current.config = normaliseSnowGuardConfig(body, current.config);
         current.runtime.lastDecision = snowDecision(
@@ -2569,10 +2529,10 @@ export class SnowGuard {
       return json({ success: true, ...snapshot });
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/check") {
-      return json({ success: true, ...(await this.enqueue(() => this.dryRun())) });
+      return json({ success: true, ...(await this.mutations.enqueue(() => this.dryRun())) });
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/tick") {
-      return json({ success: true, ...(await this.enqueue(() => this.tick())) });
+      return json({ success: true, ...(await this.mutations.enqueue(() => this.tick())) });
     }
     return json({ success: false, error: "Not found" }, 404);
   }

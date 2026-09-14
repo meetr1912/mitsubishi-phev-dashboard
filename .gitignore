@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 node_modules/
 .wrangler/
+.test-dist/
 .env
 .DS_Store
 *.swp
