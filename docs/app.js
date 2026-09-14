@@ -1533,20 +1533,57 @@
 
   async function snowGuardRequest(path, method, payload) {
     var key = window.PHEV.getApiKey ? window.PHEV.getApiKey() : "";
-    if (!key) return null;
-    var res = await fetch(CONFIG.WORKER_URL + path, {
-      method: method,
-      headers: Object.assign({ "X-Dashboard-Key": key }, payload ? { "Content-Type": "application/json" } : {}),
-      body: payload ? JSON.stringify(payload) : undefined
-    });
-    var body = {};
-    try { body = await res.json(); } catch (e) { /* non-JSON is handled by status */ }
-    return { ok: res.ok, body: body };
+    if (!key) return { ok: false, status: 401, body: { error: "Unlock required" }, transportError: null };
+    var controller = window.AbortController ? new AbortController() : null;
+    var timeout = controller ? setTimeout(function () { controller.abort(); }, 12000) : null;
+    try {
+      var res = await fetch(CONFIG.WORKER_URL + path, {
+        method: method,
+        headers: Object.assign({ "X-Dashboard-Key": key }, payload ? { "Content-Type": "application/json" } : {}),
+        body: payload ? JSON.stringify(payload) : undefined,
+        signal: controller ? controller.signal : undefined
+      });
+      var body = {};
+      try { body = await res.json(); } catch (e) { /* status below remains useful */ }
+      return { ok: res.ok, status: res.status, body: body, transportError: null };
+    } catch (e) {
+      return {
+        ok: false,
+        status: 0,
+        body: null,
+        transportError: e && e.name === "AbortError" ? "timeout" : "network"
+      };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  function snowGuardFailureMessage(result) {
+    if (!result) return "Snow Guard request could not start.";
+    if (result.status === 401) return "Dashboard access expired. Unlock again, then retry.";
+    if (result.status === 404) {
+      return "Snow Guard is not deployed to the command relay yet. The dashboard is newer than the live Worker; no vehicle action was sent.";
+    }
+    if (result.status === 502 || result.status === 503) {
+      return "Snow Guard is deploying or unavailable on the relay. Retry shortly; no vehicle action was sent.";
+    }
+    if (result.transportError === "timeout") return "Snow Guard did not respond within 12 seconds. Retry; no vehicle action was sent.";
+    if (result.transportError === "network") return "Snow Guard could not reach the command relay. Check your connection, then retry.";
+    if (result.body && typeof result.body.error === "string" && result.body.error) {
+      return "Snow Guard: " + result.body.error;
+    }
+    return "Snow Guard request failed. No vehicle action was sent.";
+  }
+
+  function showSnowGuardFailure(result) {
+    if (!snowGuardStatusEl) return;
+    snowGuardStatusEl.className = "snow-guard-status error";
+    snowGuardStatusEl.textContent = snowGuardFailureMessage(result);
   }
 
   function snowGuardKind(code) {
     if (code === "climate_started") return "good";
-    if (code === "climate_pending" || code === "light_snow" || code === "cooldown" || code === "daily_limit") return "caution";
+    if (code === "climate_pending" || code === "light_snow" || code === "remote_climate_reserve") return "caution";
     if (code === "weather_unavailable" || code === "climate_error" || code === "climate_rejected") return "error";
     return "";
   }
@@ -1555,7 +1592,8 @@
     if (!weather) return "";
     var temp = typeof weather.temperatureC === "number" ? Math.round(weather.temperatureC) + "°C" : "temperature unavailable";
     var snow = typeof weather.nextThreeHoursSnowCm === "number" ? weather.nextThreeHoursSnowCm.toFixed(1) + " cm / 3 h" : "snowfall unavailable";
-    return temp + " · " + snow;
+    var adhesion = weather.adhesionRisk ? " · " + weather.adhesionRisk + " adhesion" : "";
+    return temp + " · " + snow + adhesion;
   }
 
   function renderSnowGuard(body) {
@@ -1605,18 +1643,10 @@
       if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Unlock to load Snow Guard.";
       return;
     }
-    try {
-      var result = await snowGuardRequest("/snow-guard", "GET");
-      if (!result || !result.ok || !result.body || !result.body.success) {
-        throw new Error((result && result.body && result.body.error) || "request failed");
-      }
-      renderSnowGuard(result.body);
-    } catch (e) {
-      if (snowGuardStatusEl) {
-        snowGuardStatusEl.className = "snow-guard-status error";
-        snowGuardStatusEl.textContent = "Could not load Snow Guard" + (e && e.message ? ": " + e.message : ".");
-      }
-    }
+    if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Loading Snow Guard…";
+    var result = await snowGuardRequest("/snow-guard", "GET");
+    if (!result.ok || !result.body || !result.body.success) return showSnowGuardFailure(result);
+    renderSnowGuard(result.body);
   }
 
   async function saveSnowGuard() {
@@ -1629,20 +1659,19 @@
       enabled: !!(snowGuardEnabledEl && snowGuardEnabledEl.checked),
       minBatteryPct: parseInt(snowGuardMinBatteryEl && snowGuardMinBatteryEl.value, 10) || 35,
       requirePlugged: !!(snowGuardPluggedEl && snowGuardPluggedEl.checked),
-      maxRunsPerDay: current.maxRunsPerDay || 2,
-      cooldownMinutes: current.cooldownMinutes || 360,
       location: current.location || { latitude: 44.6488, longitude: -63.5752, label: "Halifax, NS" }
     };
     try {
       var result = await snowGuardRequest("/snow-guard", "PUT", config);
-      if (!result || !result.ok || !result.body || !result.body.success) throw new Error((result && result.body && result.body.error) || "request failed");
+      if (!result.ok || !result.body || !result.body.success) {
+        showSnowGuardFailure(result);
+        toast("Snow Guard save failed.", "error");
+        return;
+      }
       renderSnowGuard(result.body);
       toast(config.enabled ? "Snow Guard enabled." : "Snow Guard disabled.", "success");
     } catch (e) {
-      if (snowGuardStatusEl) {
-        snowGuardStatusEl.className = "snow-guard-status error";
-        snowGuardStatusEl.textContent = "Snow Guard was not saved.";
-      }
+      showSnowGuardFailure(null);
       toast("Snow Guard save failed.", "error");
     } finally {
       snowGuardSaveBtn.classList.remove("sending");
@@ -1656,15 +1685,13 @@
     if (snowGuardStatusEl) snowGuardStatusEl.textContent = "Checking Halifax conditions…";
     try {
       var result = await snowGuardRequest("/snow-guard/check", "POST");
-      if (!result || !result.ok || !result.body || !result.body.success) {
-        throw new Error((result && result.body && result.body.error) || "request failed");
+      if (!result.ok || !result.body || !result.body.success) {
+        showSnowGuardFailure(result);
+        return;
       }
       renderSnowGuard(result.body);
     } catch (e) {
-      if (snowGuardStatusEl) {
-        snowGuardStatusEl.className = "snow-guard-status error";
-        snowGuardStatusEl.textContent = "Could not check conditions" + (e && e.message ? ": " + e.message : ".") + " No vehicle action was sent.";
-      }
+      showSnowGuardFailure(null);
     } finally {
       snowGuardCheckBtn.disabled = false;
     }
