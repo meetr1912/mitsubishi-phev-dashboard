@@ -10,13 +10,14 @@ class_name = "SnowGuard"
 name = "ACTION_LOG"
 class_name = "ActionLog"
 
+# Free-plan Durable Objects require SQLite-backed namespaces.
 [[migrations]]
 tag = "v1"
-new_classes = ["SnowGuard"]
+new_sqlite_classes = ["SnowGuard"]
 
 [[migrations]]
 tag = "v2"
-new_classes = ["ActionLog"]
+new_sqlite_classes = ["ActionLog"]
 
 [triggers]
 crons = ["*/15 * * * *"]
