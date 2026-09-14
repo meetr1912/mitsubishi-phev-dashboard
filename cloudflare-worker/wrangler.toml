@@ -6,9 +6,17 @@ compatibility_date = "2025-07-01"
 name = "SNOW_GUARD"
 class_name = "SnowGuard"
 
+[[durable_objects.bindings]]
+name = "ACTION_LOG"
+class_name = "ActionLog"
+
 [[migrations]]
 tag = "v1"
 new_classes = ["SnowGuard"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["ActionLog"]
 
 [triggers]
 crons = ["*/15 * * * *"]

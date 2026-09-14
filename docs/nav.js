@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  var TABS = ["status", "climate", "vehicle"];
+  var TABS = ["status", "climate", "vehicle", "activity"];
   var bar = document.querySelector(".tab-bar");
   var views = {};
   TABS.forEach(function (t) { views[t] = document.getElementById("tab-" + t); });
@@ -29,6 +29,7 @@
     // Let any native controls reflow after the new section is visible.
     requestAnimationFrame(function () {
       window.dispatchEvent(new Event("resize"));
+      document.dispatchEvent(new CustomEvent("phev:tabchange", { detail: { tab: name } }));
     });
   }
 

@@ -410,6 +410,10 @@ export interface Env {
   // routes the client-registration response back to us: REST doesn't seem to
   // care about client-id novelty, but MQTT's device-routing plausibly does.
   MMC_CLIENT_ID: string;
+  // Durable Object used for the dashboard's private, bounded activity trail.
+  // It contains only redacted request/result summaries; never credentials,
+  // PIN material, a VIN, location data, or raw Mitsubishi responses.
+  ACTION_LOG: DurableObjectNamespace;
   /**
    * Durable, single-vehicle control plane for Snow Guard. It stores only the
    * user's guardrails, decision receipts, and cooldown state — never account
@@ -435,8 +439,307 @@ const CORS_HEADERS: Record<string, string> = {
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json; charset=UTF-8", ...CORS_HEADERS },
+    headers: { "Content-Type": "application/json; charset=UTF-8", "Cache-Control": "no-store", ...CORS_HEADERS },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Private activity trail
+// ---------------------------------------------------------------------------
+//
+// The dashboard needs an audit trail for remote commands and the validation
+// reads that support them, but the Worker must never persist raw upstream
+// payloads. Those can contain VINs, GPS, account details, or tokens. The
+// records below are deliberately a small, stable JSON contract for the UI.
+
+type ActivityKind = "command" | "validation" | "status";
+
+interface ActivityRecord {
+  id: string;
+  at: string;
+  kind: ActivityKind;
+  route: string;
+  action: string;
+  request: Record<string, unknown>;
+  result: {
+    success: boolean;
+    http_status: number;
+    outcome: string | null;
+    message: string | null;
+    remote_status: string | null;
+    reason_code: string | null;
+    error_label: string | null;
+    polls: number | null;
+    duration_ms: number;
+  };
+}
+
+interface AuditContext {
+  id: string;
+  at: string;
+  startedAt: number;
+  kind: ActivityKind;
+  route: string;
+  action: string;
+  request: Record<string, unknown>;
+}
+
+const ACTIVITY_STORAGE_KEY = "records";
+const ACTIVITY_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
+const ACTIVITY_MAX_RECORDS = 1_000;
+
+function activityId(): string {
+  return Array.from(randomBytes(12)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function activityNow(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function activityString(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  return value.replace(/[\r\n\t]+/g, " ").trim().slice(0, 180);
+}
+
+function redactedActivityText(value: unknown): string | null {
+  const text = activityString(value);
+  if (!text) return null;
+  return text
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+    .replace(/\b[A-HJ-NPR-Z0-9]{17}\b/gi, "[redacted-vin]")
+    .replace(/\b(?:access[_-]?)?(bearer|token|password|pin|authorization)\b["']?\s*[:=]\s*["']?[^\s,;}"]+/gi, "$1=[redacted]")
+    .replace(/\b-?\d{1,2}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}\b/g, "[redacted-location]")
+    .slice(0, 180);
+}
+
+function activityNumber(value: unknown, min: number, max: number): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(min, Math.min(max, Math.round(value)))
+    : null;
+}
+
+function activityDays(value: unknown): string[] {
+  const allowed = new Set(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
+  return Array.isArray(value)
+    ? value.filter((day): day is string => typeof day === "string" && allowed.has(day)).slice(0, 7)
+    : [];
+}
+
+function commandActivityRequest(
+  action: unknown,
+  rawMinutes: unknown,
+  rawTemp: unknown,
+  rawOptions: unknown,
+  rawTimers: unknown,
+): Record<string, unknown> {
+  const command = activityString(action, "invalid_command").slice(0, 64) || "invalid_command";
+  if (command === "climate") {
+    const options = Array.isArray(rawOptions)
+      ? rawOptions.filter((option): option is string => typeof option === "string" && CLIMATE_OPTION_KEYS.has(option)).slice(0, 8)
+      : [];
+    return {
+      duration_min: activityNumber(rawMinutes, 1, MAX_HVAC_MINUTES) ?? DEFAULT_HVAC_MINUTES,
+      target_c: activityNumber(rawTemp, MIN_HVAC_TEMP_C, MAX_HVAC_TEMP_C) ?? DEFAULT_HVAC_TEMP_C,
+      options,
+    };
+  }
+  if (command === "charging_schedule" || command === "climate_schedule") {
+    const timerLimit = command === "climate_schedule" ? CLIMATE_MAX_TIMERS : CHARGING_MAX_TIMERS;
+    const timers = Array.isArray(rawTimers) ? rawTimers.slice(0, timerLimit).flatMap((timer) => {
+      if (!isRecord(timer)) return [];
+      const summary: Record<string, unknown> = {
+        enabled: timer.enabled === true,
+        days: activityDays(timer.days),
+      };
+      if (command === "charging_schedule") {
+        summary.start_min = activityNumber(timer.startMinutes, 0, 1439);
+        summary.end_min = activityNumber(timer.endMinutes, 0, 1439);
+      } else {
+        summary.ready_by_min = activityNumber(timer.departureMinutes, 0, 1439);
+      }
+      return [summary];
+    }) : [];
+    return { timers };
+  }
+  return {};
+}
+
+function createAuditContext(url: URL): AuditContext {
+  let kind: ActivityKind = "validation";
+  let action = "validation";
+  let request: Record<string, unknown> = {};
+  switch (url.pathname) {
+    case "/status":
+      kind = "status";
+      action = "status_refresh";
+      break;
+    case "/state":
+      action = "vehicle_state";
+      break;
+    case "/settings":
+      action = "settings_read";
+      request = { operation: activityString(url.searchParams.get("operation") ?? "remoteAC", "remoteAC").slice(0, 64) };
+      break;
+    case "/config":
+      action = "capability_validation";
+      break;
+    case "/mqtt-discover":
+      action = "mqtt_validation";
+      break;
+    default:
+      kind = "command";
+      action = "command";
+  }
+  return { id: activityId(), at: activityNow(), startedAt: Date.now(), kind, route: url.pathname, action, request };
+}
+
+function activityResult(body: unknown, status: number, durationMs: number): ActivityRecord["result"] {
+  const data = isRecord(body) ? body : {};
+  const event = isRecord(data.event) ? data.event : {};
+  const success = data.success === true;
+  const outcome = typeof data.outcome === "string"
+    ? activityString(data.outcome)
+    : typeof event.outcome === "string" ? activityString(event.outcome) : null;
+  const message = redactedActivityText(data.error ?? data.message);
+  return {
+    success,
+    http_status: status,
+    outcome: outcome || null,
+    message,
+    remote_status: activityString(event.status) || null,
+    reason_code: activityString(event.reasonCode) || null,
+    error_label: redactedActivityText(event.errorLabel),
+    polls: activityNumber(event.polls, 0, 1_000),
+    duration_ms: Math.max(0, Math.round(durationMs)),
+  };
+}
+
+function recordActivity(context: AuditContext, body: unknown, status: number): ActivityRecord {
+  return {
+    id: context.id,
+    at: context.at,
+    kind: context.kind,
+    route: context.route,
+    action: context.action,
+    request: context.request,
+    result: activityResult(body, status, Date.now() - context.startedAt),
+  };
+}
+
+/**
+ * Snow Guard replies contain its configuration, including a city-level weather
+ * location. Convert them to the small, safe receipt used by the activity log
+ * before anything crosses the Durable Object boundary.
+ */
+function snowGuardActivityBody(body: unknown, fallbackSuccess: boolean): Record<string, unknown> {
+  const payload = isRecord(body) ? body : {};
+  const runtime = isRecord(payload.runtime) ? payload.runtime : {};
+  const decision = isRecord(runtime.lastDecision) ? runtime.lastDecision : {};
+  return {
+    success: typeof payload.success === "boolean" ? payload.success : fallbackSuccess,
+    outcome: activityString(decision.code) || null,
+    message: redactedActivityText(decision.summary),
+  };
+}
+
+/** Only scheduled checks that reached the vehicle (or tried to) join the car activity trail. */
+function snowGuardReachedVehicle(body: unknown): boolean {
+  const payload = isRecord(body) ? body : {};
+  const runtime = isRecord(payload.runtime) ? payload.runtime : {};
+  const decision = isRecord(runtime.lastDecision) ? runtime.lastDecision : {};
+  return new Set([
+    "vehicle_moving", "vehicle_open", "not_plugged", "battery_unknown", "battery_low",
+    "climate_started", "climate_rejected", "climate_pending", "climate_error",
+  ]).has(activityString(decision.code));
+}
+
+async function auditSnowGuardTick(env: Env): Promise<void> {
+  const audit: AuditContext = {
+    id: activityId(), at: activityNow(), startedAt: Date.now(), kind: "validation",
+    route: "/snow-guard/tick", action: "snow_guard_check", request: { automated: true },
+  };
+  const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
+  try {
+    const response = await env.SNOW_GUARD.get(id).fetch("https://snow-guard/snow-guard/tick", { method: "POST" });
+    const body = await response.clone().json().catch(() => null);
+    if (!snowGuardReachedVehicle(body)) return;
+    await appendActivity(env, recordActivity(audit, snowGuardActivityBody(body, response.ok), response.status));
+  } catch (err) {
+    // A failed automation attempt belongs in the trail, but it must never make
+    // the scheduled event fail or expose a lower-level error string.
+    try {
+      await appendActivity(env, recordActivity(audit, { success: false, error: "Snow Guard check failed" }, 502));
+    } catch (logErr) {
+      console.warn("Activity log write failed", (logErr as Error).message);
+    }
+    console.warn("Snow Guard check failed", (err as Error).message);
+  }
+}
+
+function pruneActivity(records: ActivityRecord[]): ActivityRecord[] {
+  const cutoff = Date.now() - ACTIVITY_RETENTION_MS;
+  return records
+    .filter((record) => record && typeof record.at === "string" && Date.parse(record.at) >= cutoff)
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, ACTIVITY_MAX_RECORDS);
+}
+
+/** A single, serialised store prevents concurrent dashboard requests losing a log entry. */
+export class ActionLog {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/append" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      if (!isRecord(body) || !isRecord(body.record)) return new Response("Bad activity record", { status: 400 });
+      const record = body.record as unknown as ActivityRecord;
+      if (!record.id || !record.at || !record.action || !record.result) return new Response("Bad activity record", { status: 400 });
+      await this.state.storage.transaction(async (txn) => {
+        const current = (await txn.get<ActivityRecord[]>(ACTIVITY_STORAGE_KEY)) ?? [];
+        await txn.put(ACTIVITY_STORAGE_KEY, pruneActivity([record, ...current]));
+      });
+      return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/list" && request.method === "GET") {
+      const current = (await this.state.storage.get<ActivityRecord[]>(ACTIVITY_STORAGE_KEY)) ?? [];
+      const records = pruneActivity(current);
+      if (records.length !== current.length) await this.state.storage.put(ACTIVITY_STORAGE_KEY, records);
+      const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+      const limit = Number.isFinite(requested) ? Math.max(1, Math.min(ACTIVITY_MAX_RECORDS, requested)) : 100;
+      return new Response(JSON.stringify({ records: records.slice(0, limit), total: records.length }), {
+        headers: { "Content-Type": "application/json; charset=UTF-8" },
+      });
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+async function appendActivity(env: Env, record: ActivityRecord): Promise<void> {
+  const stub = env.ACTION_LOG.get(env.ACTION_LOG.idFromName("primary"));
+  const response = await stub.fetch("https://activity.internal/append", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ record }),
+  });
+  if (!response.ok) throw new Error(`Activity log write failed: HTTP ${response.status}`);
+}
+
+async function readActivity(env: Env, limit: number): Promise<{ records: ActivityRecord[]; total: number }> {
+  const stub = env.ACTION_LOG.get(env.ACTION_LOG.idFromName("primary"));
+  const response = await stub.fetch(`https://activity.internal/list?limit=${encodeURIComponent(String(limit))}`);
+  if (!response.ok) throw new ApiError(502, "Activity log read failed");
+  const payload = await response.json() as { records?: ActivityRecord[]; total?: number };
+  return {
+    records: Array.isArray(payload.records) ? payload.records : [],
+    total: typeof payload.total === "number" ? payload.total : 0,
+  };
 }
 
 /** Uint8Array -> base64 string. */
@@ -2193,7 +2496,7 @@ export class SnowGuard {
 // ---------------------------------------------------------------------------
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
@@ -2205,10 +2508,11 @@ export default {
     const isSettings = url.pathname === "/settings" && request.method === "GET";
     const isConfig = url.pathname === "/config" && request.method === "GET";
     const isState = url.pathname === "/state" && request.method === "GET";
+    const isActivity = url.pathname === "/activity" && request.method === "GET";
     const isSnowGuard =
       (url.pathname === "/snow-guard" && (request.method === "GET" || request.method === "PUT")) ||
       (url.pathname === "/snow-guard/check" && request.method === "POST");
-    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState && !isSnowGuard) {
+    if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState && !isActivity && !isSnowGuard) {
       return json({ success: false, error: "Not found" }, 404);
     }
 
@@ -2218,13 +2522,52 @@ export default {
       return json({ success: false, error: "Unauthorized" }, 401);
     }
 
+    // Reading the activity trail is intentionally not itself logged; otherwise
+    // opening the page would create misleading audit noise forever.
+    if (isActivity) {
+      const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+      const limit = Number.isFinite(requested) ? Math.max(1, Math.min(ACTIVITY_MAX_RECORDS, requested)) : 100;
+      try {
+        const activity = await readActivity(env, limit);
+        return json({ success: true, ...activity, retention_days: 365, max_records: ACTIVITY_MAX_RECORDS });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: "Activity log is unavailable" }, 502);
+      }
+    }
+
     if (isSnowGuard) {
       // The Durable Object is not publicly addressable. This authenticated
       // proxy is deliberately the only browser path to settings and receipts.
+      // Its config can contain a city-level location, so log only the concise
+      // decision/result summary rather than the raw request or response.
+      const audit = createAuditContext(url);
+      audit.kind = "validation";
+      audit.action = url.pathname === "/snow-guard/check" ? "snow_guard_check" : "snow_guard_settings";
       const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
-      return env.SNOW_GUARD.get(id).fetch(request);
+      const response = await env.SNOW_GUARD.get(id).fetch(request);
+      const body = await response.clone().json().catch(() => null);
+      ctx.waitUntil(appendActivity(env, recordActivity(audit, snowGuardActivityBody(body, response.ok), response.status)).catch((err) => {
+        console.warn("Activity log write failed", (err as Error).message);
+      }));
+      return response;
     }
 
+    const audit = createAuditContext(url);
+    // Shadow the response helper only inside the authenticated, auditable
+    // routes. Existing early returns then all get one consistent log record
+    // without duplicating logging calls through every command branch.
+    const plainJson = json;
+    {
+      const json = (body: unknown, status = 200): Response => {
+        const record = recordActivity(audit, body, status);
+        ctx.waitUntil(appendActivity(env, record).catch((err) => {
+          // Do not fail a vehicle command merely because its audit sink is
+          // temporarily unavailable. No request, response, or secret is logged.
+          console.warn("Activity log write failed", (err as Error).message);
+        }));
+        return plainJson(body, status);
+      };
     if (isStatus) {
       try {
         const { accessToken } = await login(env);
@@ -2383,6 +2726,9 @@ export default {
     } catch {
       return json({ success: false, error: "Invalid JSON body" }, 400);
     }
+    audit.kind = "command";
+    audit.action = activityString(action, "invalid_command").slice(0, 64) || "invalid_command";
+    audit.request = commandActivityRequest(action, rawMinutes, rawTemp, rawOptions, rawTimers);
     if (typeof action !== "string" || action.length === 0) {
       return json({ success: false, error: "Missing 'action'" }, 400);
     }
@@ -2646,12 +2992,12 @@ export default {
       }
       return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
     }
+    }
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Disabled guards return before their weather request, so this 15-minute
-    // cron is effectively free of vehicle/API work until the owner opts in.
-    const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
-    ctx.waitUntil(env.SNOW_GUARD.get(id).fetch("https://snow-guard/snow-guard/tick", { method: "POST" }));
+    // Disabled guards return before their weather request. The helper records
+    // only checks that reached the vehicle, avoiding a stream of idle cron noise.
+    ctx.waitUntil(auditSnowGuardTick(env));
   },
 };

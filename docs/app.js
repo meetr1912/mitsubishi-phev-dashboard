@@ -11,6 +11,9 @@
   var CONFIG = {
     WORKER_URL: "https://phev-command-relay.phev-command-relay.workers.dev"
   };
+  // Kept public because it is a deployment URL, not a credential. Other
+  // dashboard modules use this instead of duplicating the endpoint string.
+  window.PHEV.WORKER_URL = CONFIG.WORKER_URL;
 
   // ---- small helpers ----
   function $(sel, root) { return (root || document).querySelector(sel); }
