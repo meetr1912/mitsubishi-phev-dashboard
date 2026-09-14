@@ -18,7 +18,26 @@
 
 import { mqttDiscoverOperations } from "./mqtt";
 import { SerialMutationQueue } from "./serial-mutation-queue";
-import { snowAdhesionRisk, summarizeSnowSeverity, type SnowAdhesionRisk, type SnowSeverity } from "./snow-guard-policy";
+import {
+  classifyPrecipitationPhase,
+  snowAdhesionRisk,
+  snowWeatherConfidence,
+  summarizeSnowSeverity,
+  type SnowAdhesionRisk,
+  type SnowPrecipitationPhase,
+  type SnowSeverity,
+  type SnowWeatherConfidence,
+} from "./snow-guard-policy";
+import {
+  isSnowFeedbackOutcome,
+  newSnowCalibrationCase,
+  retainSnowCalibrationCases,
+  snowFeedbackPrompt,
+  summariseSnowCalibration,
+  type SnowCalibrationCase,
+  type SnowCalibrationSummary,
+  type SnowFeedbackOutcome,
+} from "./snow-guard-calibration";
 import { CORS_ALLOW_METHODS, UPSTREAM_RESPONSE_WITHHELD } from "./worker-safety";
 
 // ---------------------------------------------------------------------------
@@ -2095,13 +2114,18 @@ const SNOW_GUARD_DEFAULT_NAME = "primary";
 const SNOW_GUARD_CONFIG_KEY = "config";
 const SNOW_GUARD_RUNTIME_KEY = "runtime";
 const SNOW_GUARD_EVENTS_KEY = "events";
+const SNOW_GUARD_CALIBRATION_KEY = "calibration";
 const SNOW_GUARD_TIMEZONE = "America/Halifax";
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+const ECCC_GEOMET_WMS_URL = "https://geo.weather.gc.ca/geomet";
 const WEATHER_REQUEST_TIMEOUT_MS = 8_000;
 type SnowDecisionCode =
   | "disabled" | "no_snow" | "light_snow" | "weather_unavailable"
+  | "weather_low_confidence" | "temperature_too_low" | "freezing_precipitation"
+  | "radar_unconfirmed"
   | "remote_climate_reserve" | "vehicle_moving" | "vehicle_open"
-  | "not_plugged" | "battery_unknown" | "battery_low" | "climate_started"
+  | "vehicle_status_unknown" | "vehicle_not_secure" | "outside_confirmation_required"
+  | "cold_engine_consent_required" | "not_plugged" | "battery_unknown" | "battery_low" | "climate_started"
   | "climate_rejected" | "climate_pending" | "climate_error";
 
 interface SnowGuardConfig {
@@ -2109,18 +2133,44 @@ interface SnowGuardConfig {
   location: { latitude: number; longitude: number; label: string };
   minBatteryPct: number;
   requirePlugged: boolean;
+  /** Explicit acknowledgement: remote climate is never suitable for a garage. */
+  outsideParkingConfirmed: boolean;
+  /** Mitsubishi warns that PHEVs can start their engine below -10°C. */
+  allowColdWeatherEngineStart: boolean;
 }
 
 interface SnowWeather {
   checkedAt: string;
+  observedAt: string | null;
+  dataAgeMinutes: number | null;
   temperatureC: number | null;
+  wetBulbC: number | null;
+  dewPointC: number | null;
+  relativeHumidityPct: number | null;
+  precipitationMm: number | null;
+  rainMm: number | null;
   currentSnowCm: number;
   nextHourSnowCm: number;
   nextThreeHoursSnowCm: number;
   weatherCode: number | null;
   windSpeedKmh: number | null;
+  windGustKmh: number | null;
   severity: SnowSeverity;
   adhesionRisk: SnowAdhesionRisk;
+  precipitationPhase: SnowPrecipitationPhase;
+  confidence: SnowWeatherConfidence;
+  radar: SnowRadarEvidence;
+}
+
+type SnowRadarPhase = "snow" | "mixed" | "freezing" | "rain" | "none" | "unknown";
+
+interface SnowRadarEvidence {
+  checkedAt: string;
+  sourceAt: string | null;
+  dataAgeMinutes: number | null;
+  phase: SnowRadarPhase;
+  snowRateCmH: number | null;
+  fresh: boolean;
 }
 
 interface SnowGuardDecision {
@@ -2140,18 +2190,29 @@ interface SnowGuardRuntime {
   lastDecision: SnowGuardDecision | null;
 }
 
+interface SnowGuardAction {
+  minutes: number;
+  outcome: EventOutcome["outcome"] | "submitted";
+  errorLabel: string | null;
+  batteryPct: number | null;
+  pluggedIn: boolean | null;
+}
+
 interface SnowGuardEvent {
   at: string;
   code: SnowDecisionCode;
   summary: string;
   weather: SnowWeather | null;
-  action?: { minutes: number; outcome: EventOutcome["outcome"] | "submitted"; errorLabel: string | null };
+  action?: SnowGuardAction;
 }
 
 interface SnowGuardSnapshot {
   config: SnowGuardConfig;
   runtime: SnowGuardRuntime;
   events: SnowGuardEvent[];
+  calibrationCases: SnowCalibrationCase[];
+  calibration: SnowCalibrationSummary;
+  feedbackPrompt: ReturnType<typeof snowFeedbackPrompt>;
 }
 
 const DEFAULT_SNOW_GUARD_CONFIG: SnowGuardConfig = {
@@ -2160,6 +2221,8 @@ const DEFAULT_SNOW_GUARD_CONFIG: SnowGuardConfig = {
   location: { latitude: 44.6488, longitude: -63.5752, label: "Halifax, NS" },
   minBatteryPct: 35,
   requirePlugged: true,
+  outsideParkingConfirmed: false,
+  allowColdWeatherEngineStart: false,
 };
 
 function snowGuardDefaultRuntime(): SnowGuardRuntime {
@@ -2187,25 +2250,168 @@ function sumValues(value: unknown, start: number, count: number): number {
   return value.slice(start, start + count).reduce<number>((sum, item) => sum + nonNegativeNumber(item), 0);
 }
 
+function forecastSampleCount(value: unknown, start: number, count: number): number {
+  if (!Array.isArray(value)) return 0;
+  return value.slice(start, start + count).filter((item) => finiteNumber(item) !== null).length;
+}
+
+function comparableWeatherTime(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function firstForecastIndex(times: unknown, currentTime: unknown): number {
-  if (!Array.isArray(times) || typeof currentTime !== "string") return 0;
-  const index = times.findIndex((time) => typeof time === "string" && time >= currentTime);
+  if (!Array.isArray(times)) return 0;
+  const current = comparableWeatherTime(currentTime);
+  if (current === null) return 0;
+  const index = times.findIndex((time) => {
+    const candidate = comparableWeatherTime(time);
+    return candidate !== null && candidate >= current;
+  });
   return index < 0 ? 0 : index;
+}
+
+/** Stull approximation, used only if the weather service omits wet bulb. */
+function estimateWetBulbC(temperatureC: number | null, relativeHumidityPct: number | null): number | null {
+  if (temperatureC === null || relativeHumidityPct === null || relativeHumidityPct < 5 || relativeHumidityPct > 100) return null;
+  const rh = relativeHumidityPct;
+  const wetBulb =
+    temperatureC * Math.atan(0.151977 * Math.sqrt(rh + 8.313659)) + Math.atan(temperatureC + rh) -
+    Math.atan(rh - 1.676331) + 0.00391838 * Math.pow(rh, 1.5) * Math.atan(0.023101 * rh) - 4.686035;
+  return Number.isFinite(wetBulb) ? Math.round(wetBulb * 10) / 10 : null;
+}
+
+function weatherObservedAt(value: unknown): { observedAt: string | null; dataAgeMinutes: number | null } {
+  const time = comparableWeatherTime(value);
+  if (time === null) return { observedAt: null, dataAgeMinutes: null };
+  // Unix API responses are seconds; Date.parse values are milliseconds.
+  const observedMs = typeof value === "number" && value < 10_000_000_000 ? value * 1000 : time;
+  if (!Number.isFinite(observedMs)) return { observedAt: null, dataAgeMinutes: null };
+  return {
+    observedAt: new Date(observedMs).toISOString(),
+    dataAgeMinutes: Math.max(0, Math.round((Date.now() - observedMs) / 60_000)),
+  };
+}
+
+function radarPointQueryUrl(config: SnowGuardConfig, layer: string): string {
+  // ECCC GeoMet WMS 1.3.0 uses latitude,longitude axis order for EPSG:4326.
+  const lat = config.location.latitude;
+  const lon = config.location.longitude;
+  const query = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: "1.3.0",
+    REQUEST: "GetFeatureInfo",
+    BBOX: `${lat - 0.01},${lon - 0.015},${lat + 0.01},${lon + 0.015}`,
+    CRS: "EPSG:4326",
+    WIDTH: "20",
+    HEIGHT: "20",
+    LAYERS: layer,
+    QUERY_LAYERS: layer,
+    INFO_FORMAT: "application/json",
+    I: "10",
+    J: "7",
+  });
+  return `${ECCC_GEOMET_WMS_URL}?${query.toString()}`;
+}
+
+interface RadarFeature {
+  value: number | null;
+  classification: string;
+  at: string | null;
+}
+
+function radarFeatureFromJson(raw: unknown): RadarFeature | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const features = (raw as { features?: unknown }).features;
+  if (!Array.isArray(features) || features.length === 0) return null;
+  const first = features[0];
+  if (first === null || typeof first !== "object" || Array.isArray(first)) return null;
+  const properties = (first as { properties?: unknown }).properties;
+  if (properties === null || typeof properties !== "object" || Array.isArray(properties)) return null;
+  const source = properties as Record<string, unknown>;
+  const at = typeof source.time === "string"
+    ? source.time
+    : typeof source.dim_reference_time === "string"
+      ? source.dim_reference_time
+      : null;
+  return {
+    value: finiteNumber(source.value),
+    classification: typeof source.class === "string" ? source.class : "",
+    at,
+  };
+}
+
+async function fetchRadarFeature(config: SnowGuardConfig, layer: string, signal: AbortSignal): Promise<RadarFeature | null> {
+  try {
+    const response = await fetch(radarPointQueryUrl(config, layer), { signal });
+    if (!response.ok) return null;
+    return radarFeatureFromJson(await response.json().catch(() => null));
+  } catch {
+    return null;
+  }
+}
+
+function snowRadarPhase(value: string): SnowRadarPhase {
+  const text = value.toLowerCase();
+  if (!text || text.includes("undetected") || text.includes("no echo")) return text ? "none" : "unknown";
+  if (text.includes("freezing")) return "freezing";
+  if (text.includes("mixed") || text.includes("ice pellet")) return "mixed";
+  if (text.includes("snow")) return "snow";
+  if (text.includes("rain")) return "rain";
+  return "unknown";
+}
+
+async function fetchSnowRadarEvidence(config: SnowGuardConfig, signal: AbortSignal): Promise<SnowRadarEvidence> {
+  const checkedAt = new Date().toISOString();
+  const [phaseFeature, rateFeature] = await Promise.all([
+    fetchRadarFeature(config, "Radar_1km_SfcPrecipType", signal),
+    fetchRadarFeature(config, "RADAR_1KM_RSNO", signal),
+  ]);
+  const phase = snowRadarPhase(phaseFeature?.classification ?? "");
+  const rateClass = (rateFeature?.classification ?? "").toLowerCase();
+  // ECCC can expose a small numeric interpolation even when the class is
+  // "Undetected". The classification is the evidence, not a raw near-zero.
+  const snowRateCmH = rateFeature && !rateClass.includes("undetected") ? rateFeature.value : 0;
+  const sourceAt = phaseFeature?.at ?? rateFeature?.at ?? null;
+  const parsed = sourceAt ? Date.parse(sourceAt) : Number.NaN;
+  const dataAgeMinutes = Number.isFinite(parsed) ? Math.max(0, Math.round((Date.now() - parsed) / 60_000)) : null;
+  return {
+    checkedAt,
+    sourceAt,
+    dataAgeMinutes,
+    phase,
+    snowRateCmH,
+    fresh: dataAgeMinutes !== null && dataAgeMinutes <= 15,
+  };
 }
 
 async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
   const query = new URLSearchParams({
     latitude: String(config.location.latitude), longitude: String(config.location.longitude),
-    timezone: SNOW_GUARD_TIMEZONE, current: "temperature_2m,snowfall,weather_code,wind_speed_10m",
-    minutely_15: "snowfall", forecast_minutely_15: "12",
+    timezone: SNOW_GUARD_TIMEZONE,
+    timeformat: "unixtime",
+    current: "temperature_2m,relative_humidity_2m,dew_point_2m,wet_bulb_temperature_2m,precipitation,rain,snowfall,weather_code,wind_speed_10m,wind_gusts_10m",
+    minutely_15: "temperature_2m,relative_humidity_2m,dew_point_2m,precipitation,rain,snowfall,weather_code,wind_speed_10m,wind_gusts_10m",
+    forecast_minutely_15: "12",
   });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), WEATHER_REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`, { signal: controller.signal });
+    const [response, radar] = await Promise.all([
+      fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`, { signal: controller.signal }),
+      fetchSnowRadarEvidence(config, controller.signal),
+    ]);
     if (!response.ok) throw new ApiError(502, `Weather lookup failed: HTTP ${response.status}`);
     const raw = (await response.json().catch(() => null)) as {
-      current?: { time?: unknown; temperature_2m?: unknown; snowfall?: unknown; weather_code?: unknown; wind_speed_10m?: unknown };
+      current?: {
+        time?: unknown; temperature_2m?: unknown; relative_humidity_2m?: unknown; dew_point_2m?: unknown;
+        wet_bulb_temperature_2m?: unknown; precipitation?: unknown; rain?: unknown; snowfall?: unknown;
+        weather_code?: unknown; wind_speed_10m?: unknown; wind_gusts_10m?: unknown;
+      };
       minutely_15?: { time?: unknown; snowfall?: unknown };
     } | null;
     if (!raw?.current) throw new ApiError(502, "Weather lookup returned no current conditions");
@@ -2215,11 +2421,32 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
     const nextHourSnowCm = sumValues(raw.minutely_15?.snowfall, index, 4);
     const nextThreeHoursSnowCm = sumValues(raw.minutely_15?.snowfall, index, 12);
     const temperatureC = finiteNumber(raw.current.temperature_2m);
+    const relativeHumidityPct = finiteNumber(raw.current.relative_humidity_2m);
+    const wetBulbC = finiteNumber(raw.current.wet_bulb_temperature_2m) ?? estimateWetBulbC(temperatureC, relativeHumidityPct);
+    const dewPointC = finiteNumber(raw.current.dew_point_2m);
+    const precipitationMm = finiteNumber(raw.current.precipitation);
+    const rainMm = finiteNumber(raw.current.rain);
     const windSpeedKmh = finiteNumber(raw.current.wind_speed_10m);
+    const windGustKmh = finiteNumber(raw.current.wind_gusts_10m);
+    const observed = weatherObservedAt(raw.current.time);
+    const forecastSamples = forecastSampleCount(raw.minutely_15?.snowfall, index, 12);
+    const confidence = snowWeatherConfidence({
+      dataAgeMinutes: observed.dataAgeMinutes,
+      temperatureC,
+      weatherCode,
+      wetBulbC,
+      forecastSamples,
+      radarFresh: radar.fresh,
+    });
     return {
-      checkedAt: new Date().toISOString(), temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode, windSpeedKmh,
+      checkedAt: new Date().toISOString(), observedAt: observed.observedAt, dataAgeMinutes: observed.dataAgeMinutes,
+      temperatureC, wetBulbC, dewPointC, relativeHumidityPct, precipitationMm, rainMm,
+      currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode, windSpeedKmh, windGustKmh,
       severity: summarizeSnowSeverity(temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode),
-      adhesionRisk: snowAdhesionRisk(temperatureC, nextHourSnowCm, nextThreeHoursSnowCm, windSpeedKmh),
+      adhesionRisk: snowAdhesionRisk(temperatureC, nextHourSnowCm, nextThreeHoursSnowCm, windSpeedKmh, wetBulbC),
+      precipitationPhase: classifyPrecipitationPhase(weatherCode, currentSnowCm, rainMm, precipitationMm, wetBulbC),
+      confidence,
+      radar,
     };
   } catch (err) {
     if (err instanceof ApiError) throw err;
@@ -2255,6 +2482,12 @@ function normaliseSnowGuardConfig(input: unknown, current = DEFAULT_SNOW_GUARD_C
     location,
     minBatteryPct: minBatteryPct === null ? current.minBatteryPct : Math.round(Math.max(20, Math.min(80, minBatteryPct))),
     requirePlugged: typeof source.requirePlugged === "boolean" ? source.requirePlugged : current.requirePlugged,
+    outsideParkingConfirmed: typeof source.outsideParkingConfirmed === "boolean"
+      ? source.outsideParkingConfirmed
+      : current.outsideParkingConfirmed,
+    allowColdWeatherEngineStart: typeof source.allowColdWeatherEngineStart === "boolean"
+      ? source.allowColdWeatherEngineStart
+      : current.allowColdWeatherEngineStart,
   };
 }
 
@@ -2263,12 +2496,34 @@ function snowDecision(code: SnowDecisionCode, summary: string, weather: SnowWeat
 }
 
 function snowWeatherSummary(weather: SnowWeather): string {
-  return `${weather.adhesionRisk} adhesion risk · ${weather.nextThreeHoursSnowCm.toFixed(1)} cm forecast over 3 h`;
+  const wetBulb = weather.wetBulbC === null ? "wet bulb unavailable" : `wet bulb ${weather.wetBulbC.toFixed(1)}°C`;
+  const radar = weather.radar.fresh
+    ? `radar ${weather.radar.phase}${weather.radar.snowRateCmH !== null ? ` ${weather.radar.snowRateCmH.toFixed(1)} cm/h` : ""}`
+    : "radar unavailable/stale";
+  return `${weather.confidence}-confidence ${weather.precipitationPhase} signal · ${radar} · ${weather.adhesionRisk} adhesion risk · ${weather.nextHourSnowCm.toFixed(1)} cm forecast in 1 h · ${wetBulb}`;
 }
 
 function snowActionPlan(weather: SnowWeather): { actionable: boolean; minutes: 20 | 30; summary: string } {
+  if (weather.confidence !== "high") {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Forecast confidence is not high enough for an automatic vehicle action.` };
+  }
+  if (weather.temperatureC !== null && weather.temperatureC < -15) {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Mitsubishi remote climate is not used below -15°C.` };
+  }
+  if (weather.precipitationPhase === "freezing" || weather.precipitationPhase === "mixed") {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Mixed/freezing precipitation can create ice; manual clearing is required.` };
+  }
+  if (weather.radar.phase === "freezing" || weather.radar.phase === "mixed") {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Radar indicates mixed/freezing precipitation; manual clearing is required.` };
+  }
   if (weather.severity === "none") {
     return { actionable: false, minutes: 20, summary: "No meaningful near-term snow risk." };
+  }
+  if (weather.currentSnowCm < 0.05 && weather.nextHourSnowCm < 0.3) {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Snow is forecast later, not within a useful defrost window.` };
+  }
+  if (weather.radar.phase !== "snow" || weather.radar.snowRateCmH === null || weather.radar.snowRateCmH <= 0) {
+    return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Forecast snow is not yet confirmed by local radar; no automatic climate action was sent.` };
   }
   if (weather.adhesionRisk === "high") {
     return { actionable: true, minutes: 30, summary: `${snowWeatherSummary(weather)}. A 30-minute windshield defrost cycle is warranted if vehicle safeguards pass.` };
@@ -2276,14 +2531,43 @@ function snowActionPlan(weather: SnowWeather): { actionable: boolean; minutes: 2
   if (weather.severity === "heavy") {
     return { actionable: true, minutes: 30, summary: `${snowWeatherSummary(weather)}. Heavy accumulation warrants a 30-minute windshield defrost cycle if vehicle safeguards pass.` };
   }
-  if (weather.severity === "moderate" && weather.adhesionRisk === "moderate") {
+  if (weather.severity === "moderate" && weather.adhesionRisk === "moderate" && weather.nextHourSnowCm >= 0.5) {
     return { actionable: true, minutes: 20, summary: `${snowWeatherSummary(weather)}. A 20-minute windshield defrost cycle is warranted if vehicle safeguards pass.` };
   }
   return { actionable: false, minutes: 20, summary: `${snowWeatherSummary(weather)}. Fresh snow is unlikely to bond strongly enough to justify remote climate.` };
 }
 
+function snowNoActionCode(weather: SnowWeather): SnowDecisionCode {
+  if (weather.confidence !== "high") return "weather_low_confidence";
+  if (weather.temperatureC !== null && weather.temperatureC < -15) return "temperature_too_low";
+  if (weather.precipitationPhase === "freezing" || weather.precipitationPhase === "mixed") return "freezing_precipitation";
+  if (weather.radar.phase === "freezing" || weather.radar.phase === "mixed") return "freezing_precipitation";
+  if (weather.severity === "none") return "no_snow";
+  if (weather.radar.phase !== "snow" || weather.radar.snowRateCmH === null || weather.radar.snowRateCmH <= 0) return "radar_unconfirmed";
+  return "light_snow";
+}
+
 function isOpenDoorValue(value: JsonValue | undefined): boolean {
   return value === "open";
+}
+
+function publicSnowGuardSnapshot(snapshot: SnowGuardSnapshot): Omit<SnowGuardSnapshot, "calibrationCases"> {
+  const { calibrationCases: _calibrationCases, ...publicSnapshot } = snapshot;
+  return publicSnapshot;
+}
+
+function snowCalibrationWeather(weather: SnowWeather) {
+  return {
+    temperatureC: weather.temperatureC,
+    wetBulbC: weather.wetBulbC,
+    nextHourSnowCm: weather.nextHourSnowCm,
+    nextThreeHoursSnowCm: weather.nextThreeHoursSnowCm,
+    precipitationPhase: weather.precipitationPhase,
+    adhesionRisk: weather.adhesionRisk,
+    confidence: weather.confidence,
+    windSpeedKmh: weather.windSpeedKmh,
+    windGustKmh: weather.windGustKmh,
+  };
 }
 
 /**
@@ -2303,10 +2587,11 @@ export class SnowGuard {
   ) {}
 
   private async snapshot(): Promise<SnowGuardSnapshot> {
-    const [storedConfig, storedRuntime, storedEvents] = await Promise.all([
+    const [storedConfig, storedRuntime, storedEvents, storedCalibration] = await Promise.all([
       this.state.storage.get<SnowGuardConfig>(SNOW_GUARD_CONFIG_KEY),
       this.state.storage.get<Partial<SnowGuardRuntime>>(SNOW_GUARD_RUNTIME_KEY),
       this.state.storage.get<SnowGuardEvent[]>(SNOW_GUARD_EVENTS_KEY),
+      this.state.storage.get<SnowCalibrationCase[]>(SNOW_GUARD_CALIBRATION_KEY),
     ]);
     const config = normaliseSnowGuardConfig(storedConfig);
     // V1 stored daily-run and cooldown fields. Retain only durable receipts
@@ -2319,7 +2604,15 @@ export class SnowGuard {
       lastDriveCheckAt: typeof storedRuntime?.lastDriveCheckAt === "string" ? storedRuntime.lastDriveCheckAt : null,
       lastDecision: storedRuntime?.lastDecision ?? null,
     };
-    return { config, runtime, events: Array.isArray(storedEvents) ? storedEvents : [] };
+    const calibrationCases = retainSnowCalibrationCases(Array.isArray(storedCalibration) ? storedCalibration : []);
+    return {
+      config,
+      runtime,
+      events: Array.isArray(storedEvents) ? storedEvents : [],
+      calibrationCases,
+      calibration: summariseSnowCalibration(calibrationCases),
+      feedbackPrompt: snowFeedbackPrompt(calibrationCases),
+    };
   }
 
   private async save(snapshot: SnowGuardSnapshot): Promise<void> {
@@ -2327,6 +2620,7 @@ export class SnowGuard {
       [SNOW_GUARD_CONFIG_KEY]: snapshot.config,
       [SNOW_GUARD_RUNTIME_KEY]: snapshot.runtime,
       [SNOW_GUARD_EVENTS_KEY]: snapshot.events,
+      [SNOW_GUARD_CALIBRATION_KEY]: retainSnowCalibrationCases(snapshot.calibrationCases),
     });
   }
 
@@ -2340,6 +2634,33 @@ export class SnowGuard {
       { at: decision.at, code: decision.code, summary: decision.summary, weather: decision.weather, ...(action ? { action } : {}) },
       ...snapshot.events,
     ].slice(0, 40);
+    snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases);
+    snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+    snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases);
+    await this.save(snapshot);
+    return snapshot;
+  }
+
+  private async feedback(eventId: string, outcome: SnowFeedbackOutcome): Promise<SnowGuardSnapshot> {
+    const snapshot = await this.snapshot();
+    const target = snapshot.calibrationCases.find((item) => item.id === eventId);
+    if (!target) throw new ApiError(404, "That Snow Guard cycle is not available for feedback.");
+    const now = Date.now();
+    if (Date.parse(target.eligibleAt) > now) {
+      throw new ApiError(409, "Feedback opens after the requested climate cycle ends.");
+    }
+    if (Date.parse(target.expiresAt) < now) {
+      throw new ApiError(410, "That Snow Guard feedback window has expired.");
+    }
+    if (target.outcome) {
+      if (target.outcome !== outcome) throw new ApiError(409, "That Snow Guard cycle already has a different recorded outcome.");
+      return snapshot; // Idempotent retry after a slow browser/network response.
+    }
+    target.outcome = outcome;
+    target.feedbackAt = new Date(now).toISOString();
+    snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases, now);
+    snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+    snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases, now);
     await this.save(snapshot);
     return snapshot;
   }
@@ -2361,7 +2682,7 @@ export class SnowGuard {
         return snapshot;
       }
       const plan = snowActionPlan(weather);
-      const code: SnowDecisionCode = plan.actionable ? "climate_pending" : weather.severity === "none" ? "no_snow" : "light_snow";
+      const code: SnowDecisionCode = plan.actionable ? "climate_pending" : snowNoActionCode(weather);
       const summary = plan.actionable
         ? `${plan.summary} This check is read-only; no vehicle action was sent.`
         : plan.summary;
@@ -2388,8 +2709,23 @@ export class SnowGuard {
 
     const plan = snowActionPlan(weather);
     if (!plan.actionable) {
-      const code: SnowDecisionCode = weather.severity === "none" ? "no_snow" : "light_snow";
+      const code = snowNoActionCode(weather);
       return this.record(snapshot, snowDecision(code, plan.summary, weather));
+    }
+
+    if (!snapshot.config.outsideParkingConfirmed) {
+      return this.record(snapshot, snowDecision(
+        "outside_confirmation_required",
+        "Snow Guard needs confirmation that the vehicle is parked outdoors, never in an enclosed garage. No vehicle action was sent.",
+        weather,
+      ));
+    }
+    if (weather.temperatureC !== null && weather.temperatureC <= -10 && !snapshot.config.allowColdWeatherEngineStart) {
+      return this.record(snapshot, snowDecision(
+        "cold_engine_consent_required",
+        "Below -10°C this PHEV may start its engine during remote climate. Enable the cold-weather acknowledgement before Snow Guard can act. No vehicle action was sent.",
+        weather,
+      ));
     }
 
     const now = Date.now();
@@ -2441,6 +2777,15 @@ export class SnowGuard {
     if (doors !== null && typeof doors === "object" && !Array.isArray(doors) && Object.values(doors).some(isOpenDoorValue)) {
       return this.record(snapshot, snowDecision("vehicle_open", "A vehicle access point is reported open. No climate action was sent.", weather));
     }
+    const requiredDoors = ["front_left", "front_right", "rear_left", "rear_right"];
+    const doorState = doors !== null && typeof doors === "object" && !Array.isArray(doors) ? doors as Record<string, JsonValue> : null;
+    if (latest.ignition_on !== false || !doorState || requiredDoors.some((key) => doorState[key] !== "closed")) {
+      return this.record(snapshot, snowDecision(
+        "vehicle_status_unknown",
+        "Vehicle state is incomplete or stale; Snow Guard will not guess that it is parked and secure. No vehicle action was sent.",
+        weather,
+      ));
+    }
     if (snapshot.config.requirePlugged && latest.plugged_in !== true) {
       return this.record(snapshot, snowDecision("not_plugged", "Vehicle is not reported plugged in. No climate action was sent.", weather));
     }
@@ -2451,6 +2796,7 @@ export class SnowGuard {
     if (batteryPct < snapshot.config.minBatteryPct) {
       return this.record(snapshot, snowDecision("battery_low", `Battery is ${Math.round(batteryPct)}%; Snow Guard requires ${snapshot.config.minBatteryPct}% or more.`, weather));
     }
+    const pluggedIn = latest.plugged_in === true ? true : latest.plugged_in === false ? false : null;
 
     // Reserve the sole automatic command before the remote request. A timeout
     // must not cause another automated start that can consume the vehicle's
@@ -2463,7 +2809,10 @@ export class SnowGuard {
     const minutes = plan.minutes;
     const request: ClimateRequest = {
       minutes,
-      temperatureC: 28,
+      // Automated weather actions avoid an extra configuration lookup. The
+      // protocol fallback is the vehicle's proven 25°C position, so do not
+      // claim a higher setpoint than this request can actually encode.
+      temperatureC: 25,
       options: [MAX_DEFROST_OPTION, "defrost_front"],
       posmap: null,
     };
@@ -2482,11 +2831,24 @@ export class SnowGuard {
               : `Vehicle rejected the Snow Guard climate request${result.event.errorLabel ? ` (${result.event.errorLabel})` : ""}.`,
             weather,
           ),
-          { minutes, outcome: result.event.outcome, errorLabel: result.event.errorLabel },
+          { minutes, outcome: result.event.outcome, errorLabel: result.event.errorLabel, batteryPct, pluggedIn },
         );
       }
       snapshot.runtime.lastRunAt = nowIso;
       const outcome = result.event?.outcome ?? "submitted";
+      if (outcome === "succeeded") {
+        snapshot.calibrationCases = retainSnowCalibrationCases([
+          newSnowCalibrationCase({
+            id: crypto.randomUUID(),
+            actionAt: nowIso,
+            minutes,
+            batteryPctAtStart: batteryPct,
+            pluggedInAtStart: pluggedIn,
+            weather: snowCalibrationWeather(weather),
+          }),
+          ...snapshot.calibrationCases,
+        ]);
+      }
       return this.record(
         snapshot,
         snowDecision(
@@ -2496,7 +2858,7 @@ export class SnowGuard {
             : `Snow Guard submitted ${minutes}-minute windshield preconditioning; vehicle confirmation is pending.`,
           weather,
         ),
-        { minutes, outcome, errorLabel: result.event?.errorLabel ?? null },
+        { minutes, outcome, errorLabel: result.event?.errorLabel ?? null, batteryPct, pluggedIn },
       );
     } catch {
       return this.record(snapshot, snowDecision("climate_error", "Snow Guard could not confirm the climate action. It will hold further automated requests until the vehicle is driven.", weather));
@@ -2506,7 +2868,7 @@ export class SnowGuard {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/snow-guard") {
-      return json({ success: true, ...(await this.snapshot()) });
+      return json({ success: true, ...publicSnowGuardSnapshot(await this.snapshot()) });
     }
     if (request.method === "PUT" && url.pathname === "/snow-guard") {
       let body: unknown;
@@ -2526,10 +2888,32 @@ export class SnowGuard {
         await this.save(current);
         return current;
       });
-      return json({ success: true, ...snapshot });
+      return json({ success: true, ...publicSnowGuardSnapshot(snapshot) });
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/check") {
-      return json({ success: true, ...(await this.mutations.enqueue(() => this.dryRun())) });
+      const snapshot = await this.mutations.enqueue(() => this.dryRun());
+      return json({ success: true, ...publicSnowGuardSnapshot(snapshot) });
+    }
+    if (request.method === "POST" && url.pathname === "/snow-guard/feedback") {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ success: false, error: "Invalid JSON body" }, 400);
+      }
+      const source = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+      const eventId = typeof source?.eventId === "string" ? source.eventId : "";
+      const outcome = source?.outcome;
+      if (!eventId || eventId.length > 64 || !isSnowFeedbackOutcome(outcome)) {
+        return json({ success: false, error: "Feedback needs a valid eventId and outcome." }, 400);
+      }
+      try {
+        const snapshot = await this.mutations.enqueue(() => this.feedback(eventId, outcome));
+        return json({ success: true, ...publicSnowGuardSnapshot(snapshot) });
+      } catch (err) {
+        if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
+        return json({ success: false, error: "Snow Guard feedback could not be saved." }, 500);
+      }
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/tick") {
       return json({ success: true, ...(await this.mutations.enqueue(() => this.tick())) });
@@ -2558,7 +2942,8 @@ export default {
     const isActivity = url.pathname === "/activity" && request.method === "GET";
     const isSnowGuard =
       (url.pathname === "/snow-guard" && (request.method === "GET" || request.method === "PUT")) ||
-      (url.pathname === "/snow-guard/check" && request.method === "POST");
+      (url.pathname === "/snow-guard/check" && request.method === "POST") ||
+      (url.pathname === "/snow-guard/feedback" && request.method === "POST");
     if (!isCommand && !isStatus && !isMqttDiscover && !isSettings && !isConfig && !isState && !isActivity && !isSnowGuard) {
       return json({ success: false, error: "Not found" }, 404);
     }
@@ -2590,7 +2975,11 @@ export default {
       // decision/result summary rather than the raw request or response.
       const audit = createAuditContext(url);
       audit.kind = "validation";
-      audit.action = url.pathname === "/snow-guard/check" ? "snow_guard_check" : "snow_guard_settings";
+      audit.action = url.pathname === "/snow-guard/check"
+        ? "snow_guard_check"
+        : url.pathname === "/snow-guard/feedback"
+          ? "snow_guard_feedback"
+          : "snow_guard_settings";
       try {
         const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
         const response = await env.SNOW_GUARD.get(id).fetch(request);

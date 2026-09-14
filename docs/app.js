@@ -1523,12 +1523,17 @@
   var snowGuardLocationEl = document.getElementById("snow-guard-location");
   var snowGuardMinBatteryEl = document.getElementById("snow-guard-min-battery");
   var snowGuardPluggedEl = document.getElementById("snow-guard-require-plugged");
+  var snowGuardOutsideEl = document.getElementById("snow-guard-outside-confirmed");
+  var snowGuardColdEngineEl = document.getElementById("snow-guard-cold-engine-consent");
   var snowGuardStatusEl = document.getElementById("snow-guard-status");
   var snowGuardSummaryEl = document.getElementById("snow-guard-summary");
   var snowGuardSaveBtn = document.getElementById("snow-guard-save");
   var snowGuardCheckBtn = document.getElementById("snow-guard-check");
   var snowGuardHistoryEl = document.getElementById("snow-guard-history");
   var snowGuardHistoryListEl = document.getElementById("snow-guard-history-list");
+  var snowGuardFeedbackEl = document.getElementById("snow-guard-feedback");
+  var snowGuardFeedbackPromptEl = document.getElementById("snow-guard-feedback-prompt");
+  var snowGuardCalibrationEl = document.getElementById("snow-guard-calibration");
   var snowGuardState = null;
 
   async function snowGuardRequest(path, method, payload) {
@@ -1583,7 +1588,9 @@
 
   function snowGuardKind(code) {
     if (code === "climate_started") return "good";
-    if (code === "climate_pending" || code === "light_snow" || code === "remote_climate_reserve") return "caution";
+    if (code === "climate_pending" || code === "light_snow" || code === "remote_climate_reserve" ||
+      code === "weather_low_confidence" || code === "temperature_too_low" || code === "freezing_precipitation" ||
+      code === "radar_unconfirmed" || code === "outside_confirmation_required" || code === "cold_engine_consent_required" || code === "vehicle_status_unknown") return "caution";
     if (code === "weather_unavailable" || code === "climate_error" || code === "climate_rejected") return "error";
     return "";
   }
@@ -1592,8 +1599,30 @@
     if (!weather) return "";
     var temp = typeof weather.temperatureC === "number" ? Math.round(weather.temperatureC) + "°C" : "temperature unavailable";
     var snow = typeof weather.nextThreeHoursSnowCm === "number" ? weather.nextThreeHoursSnowCm.toFixed(1) + " cm / 3 h" : "snowfall unavailable";
+    var wetBulb = typeof weather.wetBulbC === "number" ? " · wet bulb " + weather.wetBulbC.toFixed(1) + "°C" : "";
+    var phase = weather.precipitationPhase ? " · " + weather.precipitationPhase : "";
     var adhesion = weather.adhesionRisk ? " · " + weather.adhesionRisk + " adhesion" : "";
-    return temp + " · " + snow + adhesion;
+    var confidence = weather.confidence ? " · " + weather.confidence + " confidence" : "";
+    return temp + " · " + snow + wetBulb + phase + adhesion + confidence;
+  }
+
+  function renderSnowGuardFeedback(body) {
+    var prompt = body && body.feedbackPrompt;
+    if (snowGuardFeedbackEl) snowGuardFeedbackEl.hidden = !prompt;
+    if (snowGuardFeedbackPromptEl && prompt) {
+      snowGuardFeedbackPromptEl.textContent = "Snow Guard ran for " + prompt.minutes + " min at " + fmtTs(prompt.actionAt) + ". How did the windshield look?";
+    }
+    var calibration = body && body.calibration;
+    if (!snowGuardCalibrationEl) return;
+    if (!calibration || !calibration.responses) {
+      snowGuardCalibrationEl.hidden = false;
+      snowGuardCalibrationEl.textContent = "Outcome feedback builds evidence for this vehicle. Rules will not auto-adjust.";
+      return;
+    }
+    var useful = typeof calibration.usefulRate === "number" ? Math.round(calibration.usefulRate * 100) + "% useful" : "outcomes logged";
+    snowGuardCalibrationEl.hidden = false;
+    snowGuardCalibrationEl.textContent = calibration.responses + " outcomes: " + calibration.clear + " clear, " + calibration.partial + " partial, " + calibration.noBenefit + " no benefit · " + useful + ". " +
+      (calibration.readyForReview ? "Enough evidence for a threshold review." : (calibration.minimumSample - calibration.responses) + " more before threshold review.");
   }
 
   function renderSnowGuard(body) {
@@ -1605,6 +1634,8 @@
     if (snowGuardLocationEl && config.location && config.location.label) snowGuardLocationEl.value = config.location.label;
     if (snowGuardMinBatteryEl && config.minBatteryPct != null) snowGuardMinBatteryEl.value = String(config.minBatteryPct);
     if (snowGuardPluggedEl) snowGuardPluggedEl.checked = config.requirePlugged !== false;
+    if (snowGuardOutsideEl) snowGuardOutsideEl.checked = config.outsideParkingConfirmed === true;
+    if (snowGuardColdEngineEl) snowGuardColdEngineEl.checked = config.allowColdWeatherEngineStart === true;
     if (snowGuardSummaryEl) {
       snowGuardSummaryEl.textContent = config.enabled ? "On · 15 min" : "Off";
       snowGuardSummaryEl.classList.toggle("active", config.enabled === true);
@@ -1634,6 +1665,7 @@
         snowGuardHistoryListEl.appendChild(item);
       });
     }
+    renderSnowGuardFeedback(body);
   }
 
   async function loadSnowGuard() {
@@ -1659,6 +1691,8 @@
       enabled: !!(snowGuardEnabledEl && snowGuardEnabledEl.checked),
       minBatteryPct: parseInt(snowGuardMinBatteryEl && snowGuardMinBatteryEl.value, 10) || 35,
       requirePlugged: !!(snowGuardPluggedEl && snowGuardPluggedEl.checked),
+      outsideParkingConfirmed: !!(snowGuardOutsideEl && snowGuardOutsideEl.checked),
+      allowColdWeatherEngineStart: !!(snowGuardColdEngineEl && snowGuardColdEngineEl.checked),
       location: current.location || { latitude: 44.6488, longitude: -63.5752, label: "Halifax, NS" }
     };
     try {
@@ -1669,7 +1703,12 @@
         return;
       }
       renderSnowGuard(result.body);
-      toast(config.enabled ? "Snow Guard enabled." : "Snow Guard disabled.", "success");
+      toast(
+        config.enabled
+          ? (config.outsideParkingConfirmed ? "Snow Guard enabled." : "Snow Guard saved. Confirm outdoor parking before it can act.")
+          : "Snow Guard disabled.",
+        "success"
+      );
     } catch (e) {
       showSnowGuardFailure(null);
       toast("Snow Guard save failed.", "error");
@@ -1697,10 +1736,32 @@
     }
   }
 
+  async function submitSnowGuardFeedback(outcome) {
+    if (!snowGuardState || !snowGuardState.feedbackPrompt) return;
+    var buttons = snowGuardFeedbackEl ? snowGuardFeedbackEl.querySelectorAll("[data-snow-feedback]") : [];
+    buttons.forEach(function (button) { button.disabled = true; });
+    try {
+      var result = await snowGuardRequest("/snow-guard/feedback", "POST", {
+        eventId: snowGuardState.feedbackPrompt.eventId,
+        outcome: outcome
+      });
+      if (!result.ok || !result.body || !result.body.success) {
+        showSnowGuardFailure(result);
+        return;
+      }
+      renderSnowGuard(result.body);
+      toast("Snow Guard outcome saved.", "success");
+    } finally {
+      buttons.forEach(function (button) { button.disabled = false; });
+    }
+  }
+
   if (snowGuardPanel) {
     snowGuardPanel.addEventListener("click", function (e) {
       if (e.target.closest("#snow-guard-save")) { saveSnowGuard(); return; }
-      if (e.target.closest("#snow-guard-check")) { checkSnowGuard(); }
+      if (e.target.closest("#snow-guard-check")) { checkSnowGuard(); return; }
+      var feedback = e.target.closest("[data-snow-feedback]");
+      if (feedback) submitSnowGuardFeedback(feedback.getAttribute("data-snow-feedback"));
     });
   }
 

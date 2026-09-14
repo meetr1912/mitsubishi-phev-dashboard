@@ -512,6 +512,13 @@ svg { display: block; }
 .snow-guard-actions .btn-ghost,
 .snow-guard-actions .save-button { min-height: 46px; margin-top: 0; font-size: .8rem; }
 .snow-guard-actions .btn-ghost { border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); color: var(--blue); font-weight: 700; }
+.snow-guard-feedback { margin-top: .85rem; padding: .75rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
+.snow-guard-feedback .eyebrow { margin: 0; }
+.snow-guard-feedback p:not(.eyebrow) { margin: .3rem 0 .65rem; color: var(--text); font-size: .78rem; font-weight: 650; }
+.snow-guard-feedback-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .42rem; }
+.snow-guard-feedback-actions .btn-ghost { min-height: 38px; padding: .4rem; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); color: var(--blue); font: inherit; font-size: .7rem; font-weight: 700; }
+.snow-guard-feedback-actions .btn-ghost:disabled { opacity: .55; }
+.snow-guard-calibration { margin: .65rem 0 0; color: var(--secondary); font-size: .7rem; line-height: 1.4; }
 .snow-guard-history { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--border); }
 .snow-guard-history .eyebrow { margin: 0; }
 .snow-guard-history ul { display: grid; gap: .45rem; margin: .6rem 0 0; padding: 0; list-style: none; }

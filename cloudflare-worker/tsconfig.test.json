@@ -9,6 +9,7 @@
   },
   "include": [
     "src/serial-mutation-queue.ts",
+    "src/snow-guard-calibration.ts",
     "src/snow-guard-policy.ts",
     "src/worker-safety.ts"
   ]

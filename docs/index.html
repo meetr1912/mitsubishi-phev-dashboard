@@ -334,7 +334,7 @@
           <span class="snow-guard-summary" id="snow-guard-summary">Locked</span>
         </summary>
         <div class="snow-guard-content">
-          <p class="section-note">Watches Halifax weather every 15 minutes and only starts windshield preconditioning when forecast accumulation and snow-bonding risk justify it. It never changes your Mitsubishi climate timers.</p>
+          <p class="section-note">Watches Halifax weather every 15 minutes and only starts windshield preconditioning when high-confidence, near-term snow and bonding risk justify it. It never changes your Mitsubishi climate timers.</p>
           <p class="snow-guard-warning">This clears the cabin and glass; it cannot keep the roof or hood dry. Remove exterior snow manually before driving. Snow Guard never stops a climate session that is already running.</p>
 
           <label class="snow-guard-switch">
@@ -359,13 +359,32 @@
             <input type="checkbox" id="snow-guard-require-plugged" checked />
             <span>Only run when plugged in</span>
           </label>
-          <p class="snow-guard-guardrail">Guardrails: wet/heavy accumulation risk · 20–30 min defrost · one automated climate start per verified drive cycle · plugged-in by default.</p>
+          <label class="snow-guard-switch snow-guard-switch--minor">
+            <input type="checkbox" id="snow-guard-outside-confirmed" />
+            <span>Vehicle is parked outdoors, never in an enclosed garage</span>
+          </label>
+          <label class="snow-guard-switch snow-guard-switch--minor">
+            <input type="checkbox" id="snow-guard-cold-engine-consent" />
+            <span>Below −10°C, allow possible engine start for remote climate</span>
+          </label>
+          <p class="snow-guard-guardrail">Guardrails: high-confidence near-term snow · wet-bulb/precipitation phase · 20–30 min defrost · one automated climate start per drive indication · plugged-in by default.</p>
+          <p class="section-note">Weather evidence: Environment and Climate Change Canada GeoMet radar and Open-Meteo forecast data.</p>
 
           <div class="snow-guard-status" id="snow-guard-status" aria-live="polite">Unlock to load Snow Guard.</div>
           <div class="snow-guard-actions">
             <button type="button" class="btn-ghost" id="snow-guard-check">Check conditions</button>
             <button type="button" class="save-button snow-guard-save" id="snow-guard-save">Save Snow Guard</button>
           </div>
+          <div class="snow-guard-feedback" id="snow-guard-feedback" hidden>
+            <p class="eyebrow">Winter calibration</p>
+            <p id="snow-guard-feedback-prompt">How did the windshield look?</p>
+            <div class="snow-guard-feedback-actions" role="group" aria-label="Snow Guard outcome">
+              <button type="button" class="btn-ghost" data-snow-feedback="clear">Clear</button>
+              <button type="button" class="btn-ghost" data-snow-feedback="partial">Partly clear</button>
+              <button type="button" class="btn-ghost" data-snow-feedback="no_benefit">No benefit</button>
+            </div>
+          </div>
+          <p class="snow-guard-calibration" id="snow-guard-calibration" hidden></p>
           <div class="snow-guard-history" id="snow-guard-history" hidden>
             <p class="eyebrow">Recent Snow Guard activity</p>
             <ul id="snow-guard-history-list"></ul>
