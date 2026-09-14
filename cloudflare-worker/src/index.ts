@@ -431,7 +431,9 @@ const CORS_HEADERS: Record<string, string> = {
   // browser sends a CORS preflight for the custom X-Dashboard-Key header.
   // Access is still gated by that key, so a wildcard origin is acceptable here.
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  // Snow Guard saves use PUT. Omitting it makes browsers reject the preflight
+  // before the authenticated request ever reaches the Worker.
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-Dashboard-Key",
   "Access-Control-Max-Age": "86400",
 };
@@ -1688,11 +1690,11 @@ async function fetchVehicleIdentity(
 }
 
 async function safeText(res: Response): Promise<string> {
-  try {
-    return (await res.text()).slice(0, 500);
-  } catch {
-    return "<no body>";
-  }
+  // Mitsubishi error bodies are an untrusted third-party payload and may
+  // contain account, vehicle, or location data. None of the dashboard paths
+  // need the raw text to recover, so never echo it to the browser or logs.
+  void res;
+  return "<upstream response withheld>";
 }
 
 // ---------------------------------------------------------------------------
@@ -2089,6 +2091,7 @@ const SNOW_GUARD_RUNTIME_KEY = "runtime";
 const SNOW_GUARD_EVENTS_KEY = "events";
 const SNOW_GUARD_TIMEZONE = "America/Halifax";
 const OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast";
+const WEATHER_REQUEST_TIMEOUT_MS = 8_000;
 const SNOW_WEATHER_CODES = new Set([71, 73, 75, 77, 85, 86]);
 
 type SnowSeverity = "none" | "light" | "moderate" | "heavy";
@@ -2211,23 +2214,32 @@ async function fetchSnowWeather(config: SnowGuardConfig): Promise<SnowWeather> {
     timezone: SNOW_GUARD_TIMEZONE, current: "temperature_2m,snowfall,weather_code",
     minutely_15: "snowfall", forecast_minutely_15: "12",
   });
-  const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`);
-  if (!response.ok) throw new ApiError(502, `Weather lookup failed: HTTP ${response.status}`);
-  const raw = (await response.json().catch(() => null)) as {
-    current?: { time?: unknown; temperature_2m?: unknown; snowfall?: unknown; weather_code?: unknown };
-    minutely_15?: { time?: unknown; snowfall?: unknown };
-  } | null;
-  if (!raw?.current) throw new ApiError(502, "Weather lookup returned no current conditions");
-  const currentSnowCm = nonNegativeNumber(raw.current.snowfall);
-  const weatherCode = finiteNumber(raw.current.weather_code);
-  const index = firstForecastIndex(raw.minutely_15?.time, raw.current.time);
-  const nextHourSnowCm = sumValues(raw.minutely_15?.snowfall, index, 4);
-  const nextThreeHoursSnowCm = sumValues(raw.minutely_15?.snowfall, index, 12);
-  const temperatureC = finiteNumber(raw.current.temperature_2m);
-  return {
-    checkedAt: new Date().toISOString(), temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode,
-    severity: summarizeSnowSeverity(temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode),
-  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WEATHER_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${OPEN_METEO_FORECAST_URL}?${query.toString()}`, { signal: controller.signal });
+    if (!response.ok) throw new ApiError(502, `Weather lookup failed: HTTP ${response.status}`);
+    const raw = (await response.json().catch(() => null)) as {
+      current?: { time?: unknown; temperature_2m?: unknown; snowfall?: unknown; weather_code?: unknown };
+      minutely_15?: { time?: unknown; snowfall?: unknown };
+    } | null;
+    if (!raw?.current) throw new ApiError(502, "Weather lookup returned no current conditions");
+    const currentSnowCm = nonNegativeNumber(raw.current.snowfall);
+    const weatherCode = finiteNumber(raw.current.weather_code);
+    const index = firstForecastIndex(raw.minutely_15?.time, raw.current.time);
+    const nextHourSnowCm = sumValues(raw.minutely_15?.snowfall, index, 4);
+    const nextThreeHoursSnowCm = sumValues(raw.minutely_15?.snowfall, index, 12);
+    const temperatureC = finiteNumber(raw.current.temperature_2m);
+    return {
+      checkedAt: new Date().toISOString(), temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode,
+      severity: summarizeSnowSeverity(temperatureC, currentSnowCm, nextHourSnowCm, nextThreeHoursSnowCm, weatherCode),
+    };
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(502, "Weather lookup timed out or was unavailable");
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function normaliseSnowGuardConfig(input: unknown, current = DEFAULT_SNOW_GUARD_CONFIG): SnowGuardConfig {
@@ -2281,10 +2293,24 @@ function isOpenDoorValue(value: JsonValue | undefined): boolean {
  * and is never externally routable.
  */
 export class SnowGuard {
+  // DO requests may interleave after an await. Serialising mutations prevents
+  // a manual disable from being overwritten by an in-flight cron tick and
+  // guarantees that two ticks cannot start climate twice.
+  private mutationTail: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
   ) {}
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationTail.then(operation, operation);
+    this.mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 
   private async snapshot(): Promise<SnowGuardSnapshot> {
     const [storedConfig, storedRuntime, storedEvents] = await Promise.all([
@@ -2327,13 +2353,20 @@ export class SnowGuard {
 
   private async dryRun(): Promise<SnowGuardSnapshot> {
     const snapshot = await this.snapshot();
-    if (!snapshot.config.enabled) {
-      snapshot.runtime.lastDecision = snowDecision("disabled", "Snow Guard is off. Enable it to run automatic checks.", null);
-      await this.save(snapshot);
-      return snapshot;
-    }
     try {
       const weather = await fetchSnowWeather(snapshot.config);
+      // A manual check is informational and never reaches the vehicle. It is
+      // useful before opt-in, so report the weather even while automation is
+      // disabled instead of making the user enable the feature just to test it.
+      if (!snapshot.config.enabled) {
+        snapshot.runtime.lastDecision = snowDecision(
+          "disabled",
+          `${snowWeatherSummary(weather)}. Snow Guard is off; no vehicle action was sent.`,
+          weather,
+        );
+        await this.save(snapshot);
+        return snapshot;
+      }
       const code: SnowDecisionCode = weather.severity === "none" ? "no_snow" : weather.severity === "light" ? "light_snow" : "climate_pending";
       const summary = code === "climate_pending"
         ? `${snowWeatherSummary(weather)}. The next scheduled check can precondition if vehicle safeguards pass.`
@@ -2471,21 +2504,24 @@ export class SnowGuard {
       } catch {
         return json({ success: false, error: "Invalid JSON body" }, 400);
       }
-      const snapshot = await this.snapshot();
-      snapshot.config = normaliseSnowGuardConfig(body, snapshot.config);
-      snapshot.runtime.lastDecision = snowDecision(
-        snapshot.config.enabled ? "climate_pending" : "disabled",
-        snapshot.config.enabled ? "Snow Guard enabled. It will check Halifax weather every 15 minutes." : "Snow Guard is off.",
-        snapshot.runtime.lastDecision?.weather ?? null,
-      );
-      await this.save(snapshot);
+      const snapshot = await this.enqueue(async () => {
+        const current = await this.snapshot();
+        current.config = normaliseSnowGuardConfig(body, current.config);
+        current.runtime.lastDecision = snowDecision(
+          current.config.enabled ? "climate_pending" : "disabled",
+          current.config.enabled ? "Snow Guard enabled. It will check Halifax weather every 15 minutes." : "Snow Guard is off.",
+          current.runtime.lastDecision?.weather ?? null,
+        );
+        await this.save(current);
+        return current;
+      });
       return json({ success: true, ...snapshot });
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/check") {
-      return json({ success: true, ...(await this.dryRun()) });
+      return json({ success: true, ...(await this.enqueue(() => this.dryRun())) });
     }
     if (request.method === "POST" && url.pathname === "/snow-guard/tick") {
-      return json({ success: true, ...(await this.tick()) });
+      return json({ success: true, ...(await this.enqueue(() => this.tick())) });
     }
     return json({ success: false, error: "Not found" }, 404);
   }
@@ -2544,13 +2580,22 @@ export default {
       const audit = createAuditContext(url);
       audit.kind = "validation";
       audit.action = url.pathname === "/snow-guard/check" ? "snow_guard_check" : "snow_guard_settings";
-      const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
-      const response = await env.SNOW_GUARD.get(id).fetch(request);
-      const body = await response.clone().json().catch(() => null);
-      ctx.waitUntil(appendActivity(env, recordActivity(audit, snowGuardActivityBody(body, response.ok), response.status)).catch((err) => {
-        console.warn("Activity log write failed", (err as Error).message);
-      }));
-      return response;
+      try {
+        const id = env.SNOW_GUARD.idFromName(SNOW_GUARD_DEFAULT_NAME);
+        const response = await env.SNOW_GUARD.get(id).fetch(request);
+        const body = await response.clone().json().catch(() => null);
+        ctx.waitUntil(appendActivity(env, recordActivity(audit, snowGuardActivityBody(body, response.ok), response.status)).catch((err) => {
+          console.warn("Activity log write failed", (err as Error).message);
+        }));
+        return response;
+      } catch (err) {
+        const body = { success: false, error: "Snow Guard service is unavailable" };
+        ctx.waitUntil(appendActivity(env, recordActivity(audit, body, 502)).catch((logErr) => {
+          console.warn("Activity log write failed", (logErr as Error).message);
+        }));
+        console.warn("Snow Guard request failed", (err as Error).message);
+        return json(body, 502);
+      }
     }
 
     const audit = createAuditContext(url);
@@ -2626,7 +2671,9 @@ export default {
           : operation === "climateControl"
             ? parseClimateSchedule(settings)
             : undefined;
-        return json({ success: true, operation, settings, schedule });
+        // The raw settings document can contain vehicle identifiers and
+        // control metadata. The browser only needs the normalized schedule.
+        return json({ success: true, operation, schedule });
       } catch (err) {
         if (err instanceof ApiError) return json({ success: false, error: err.message }, err.status);
         return json({ success: false, error: `Unexpected error: ${(err as Error).message}` }, 500);
@@ -2739,9 +2786,9 @@ export default {
     if (action === "charge_start" || action === "charge_stop") {
       const direction = action === "charge_start" ? "start" : "stop";
       try {
-        const { eventId, submitted, event } = await runChargingControl(env, direction);
+        const { eventId, event } = await runChargingControl(env, direction);
         if (!event) {
-          return json({ success: true, action, message: `'${action}' submitted.`, eventId, raw: submitted });
+          return json({ success: true, action, message: `'${action}' submitted.`, eventId });
         }
         const message =
           event.outcome === "succeeded"
@@ -2798,9 +2845,9 @@ export default {
         // for a "new" timer on every save, creating a fresh timer each time
         // instead of ever editing the one before it.
         const sentTimers = parseChargingSchedule(extra as JsonValue);
-        const { eventId, submitted, event } = await runCommand(env, "chargingControl2", extra);
+        const { eventId, event } = await runCommand(env, "chargingControl2", extra);
         if (!event) {
-          return json({ success: true, action, message: "Charging schedule submitted.", eventId, raw: submitted, timers: sentTimers });
+          return json({ success: true, action, message: "Charging schedule submitted.", eventId, timers: sentTimers });
         }
         const message =
           event.outcome === "succeeded"
@@ -2869,7 +2916,7 @@ export default {
           ? await pollEvent(accessToken, vin, eventId, POLL_TIMEOUT_MS, "climateControl")
           : null;
         if (!event) {
-          return json({ success: true, action, message: "Climate schedule submitted.", eventId: eventId ?? null, raw: submitted, timers: sentTimers });
+          return json({ success: true, action, message: "Climate schedule submitted.", eventId: eventId ?? null, timers: sentTimers });
         }
         const message =
           event.outcome === "succeeded"
@@ -2945,14 +2992,14 @@ export default {
     }
 
     try {
-      const { eventId, submitted, event } = isHvac
+      const { eventId, event } = isHvac
         ? await runClimateStart(env, climateRequest!)
         : await runCommand(env, operation, extra);
 
       // No eventId means the backend answered synchronously (some operations do)
       // — treat the accepted submission as the result rather than inventing one.
       if (!event) {
-        return json({ success: true, action, message: `'${action}' submitted.`, eventId, raw: submitted });
+        return json({ success: true, action, message: `'${action}' submitted.`, eventId });
       }
 
       const duration = isHvac

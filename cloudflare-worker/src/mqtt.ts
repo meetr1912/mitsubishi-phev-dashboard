@@ -153,22 +153,20 @@ class MqttReader {
 export interface DiscoveredOperation {
   name?: string;
   displayName?: string;
-  request?: { signature: boolean; topic?: string; qos?: number; keyFields: string[] };
-  response?: { topic?: string; qos?: number; keyFields: string[] };
-  dataChannel?: { topic?: string; qos?: number };
+  request?: { signature: boolean; qos?: number; keyFields: string[] };
+  response?: { qos?: number; keyFields: string[] };
+  dataChannel?: { qos?: number };
 }
 
 export interface DiscoveryResult {
-  sessionKey: string | null;
-  chKeyExpirationSeconds: number | null;
   operations: DiscoveredOperation[];
-  raw: unknown;
 }
 
 /**
- * Perform the client-registration MQTT handshake and return the decoded
- * per-vehicle operations list (topics/qos/signature/keyFields) + sessionKey.
- * Read-only discovery — does not publish anything that touches the vehicle.
+ * Perform the client-registration MQTT handshake and return a safe capability
+ * summary. Topics, session keys, vehicle identifiers, and the raw response
+ * remain inside the Worker. Discovery does not publish anything that touches
+ * the vehicle.
  */
 export async function mqttDiscoverOperations(opts: {
   accessToken: string;
@@ -247,9 +245,6 @@ export async function mqttDiscoverOperations(opts: {
     const vehicleEntry = vehicles.find(
       (v) => typeof v?.vin === "string" && (v.vin as string).toUpperCase() === opts.vin.toUpperCase(),
     );
-    const sessionKey = typeof vehicleEntry?.sessionKey === "string" ? (vehicleEntry.sessionKey as string) : null;
-    const chKeyExpirationSeconds =
-      typeof vehicleEntry?.chKeyExpiration === "number" ? (vehicleEntry.chKeyExpiration as number) : null;
     const operationsRaw = Array.isArray(vehicleEntry?.operations)
       ? (vehicleEntry!.operations as Record<string, unknown>[])
       : [];
@@ -264,7 +259,6 @@ export async function mqttDiscoverOperations(opts: {
         request: req
           ? {
               signature: req.signature === 1,
-              topic: typeof req.topic === "string" ? req.topic : undefined,
               qos: typeof req.qos === "number" ? req.qos : undefined,
               keyFields: Array.isArray(req.keyFields)
                 ? (req.keyFields as Record<string, unknown>[])
@@ -275,7 +269,6 @@ export async function mqttDiscoverOperations(opts: {
           : undefined,
         response: res
           ? {
-              topic: typeof res.topic === "string" ? res.topic : undefined,
               qos: typeof res.qos === "number" ? res.qos : undefined,
               keyFields: Array.isArray(res.keyFields)
                 ? (res.keyFields as Record<string, unknown>[])
@@ -285,12 +278,12 @@ export async function mqttDiscoverOperations(opts: {
             }
           : undefined,
         dataChannel: dc
-          ? { topic: typeof dc.topic === "string" ? dc.topic : undefined, qos: typeof dc.qos === "number" ? dc.qos : undefined }
+          ? { qos: typeof dc.qos === "number" ? dc.qos : undefined }
           : undefined,
       };
     });
 
-    return { sessionKey, chKeyExpirationSeconds, operations, raw: parsed };
+    return { operations };
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
     throw new Error(msg.startsWith("[stage=") ? msg : `[stage=${stage}] ${msg}`);
