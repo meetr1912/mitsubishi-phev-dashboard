@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SerialMutationQueue } from "../.test-dist/src/serial-mutation-queue.js";
-import { classifyPrecipitationPhase, snowAdhesionRisk, snowWeatherConfidence, summarizeSnowSeverity } from "../.test-dist/src/snow-guard-policy.js";
+import { classifyPrecipitationPhase, haversineDistanceKm, radarSamplesAreFreshAndAligned, snowAdhesionRisk, snowWeatherConfidence, summarizeSnowSeverity } from "../.test-dist/src/snow-guard-policy.js";
 import { isSnowFeedbackOutcome, snowFeedbackPrompt, summariseSnowCalibration } from "../.test-dist/src/snow-guard-calibration.js";
 import { CORS_ALLOW_METHODS, UPSTREAM_RESPONSE_WITHHELD } from "../.test-dist/src/worker-safety.js";
 
@@ -32,6 +32,17 @@ test("Snow Guard fails closed when weather evidence is stale, incomplete, or rad
   assert.equal(classifyPrecipitationPhase(66, 0, 1, 1, -1), "freezing");
   assert.equal(classifyPrecipitationPhase(71, 0.2, 0, 1, -1), "snow");
   assert.equal(classifyPrecipitationPhase(null, 0, 0.2, 0.2, 0), "mixed");
+});
+
+test("Snow Guard rejects off-target, future, stale, or divergent radar evidence", () => {
+  const now = Date.parse("2026-12-01T12:00:00Z");
+  const nearby = radarSamplesAreFreshAndAligned(now - 6 * 60_000, now - 6 * 60_000, now);
+  assert.deepEqual(nearby, { fresh: true, dataAgeMinutes: 6, olderTimestampMs: now - 6 * 60_000 });
+  assert.equal(radarSamplesAreFreshAndAligned(now + 1, now, now).fresh, false);
+  assert.equal(radarSamplesAreFreshAndAligned(now - 3 * 60_000, now - 16 * 60_000, now).fresh, false);
+  assert.equal(radarSamplesAreFreshAndAligned(now - 1 * 60_000, now - 14 * 60_000, now).fresh, false);
+  assert.ok(haversineDistanceKm(44.6488, -63.5752, 44.6501, -63.5655) < 1);
+  assert.ok(haversineDistanceKm(44.6488, -63.5752, 44.7099, -63.5794) > 6);
 });
 
 test("Snow Guard calibration accepts only bounded, idempotent outcome choices", () => {

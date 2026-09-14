@@ -8,6 +8,7 @@ export type SnowFeedbackOutcome = "clear" | "partial" | "no_benefit";
 export interface SnowCalibrationWeather {
   temperatureC: number | null;
   wetBulbC: number | null;
+  currentSnowCm: number;
   nextHourSnowCm: number;
   nextThreeHoursSnowCm: number;
   precipitationPhase: string;
@@ -15,6 +16,11 @@ export interface SnowCalibrationWeather {
   confidence: string;
   windSpeedKmh: number | null;
   windGustKmh: number | null;
+  radarPhase: string;
+  radarSnowRateCmH: number | null;
+  radarSourceAt: string | null;
+  radarDataAgeMinutes: number | null;
+  radarFresh: boolean;
 }
 
 export interface SnowCalibrationCase {

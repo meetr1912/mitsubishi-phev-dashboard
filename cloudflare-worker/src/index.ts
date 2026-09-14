@@ -20,6 +20,8 @@ import { mqttDiscoverOperations } from "./mqtt";
 import { SerialMutationQueue } from "./serial-mutation-queue";
 import {
   classifyPrecipitationPhase,
+  haversineDistanceKm,
+  radarSamplesAreFreshAndAligned,
   snowAdhesionRisk,
   snowWeatherConfidence,
   summarizeSnowSeverity,
@@ -676,7 +678,7 @@ function snowGuardReachedVehicle(body: unknown): boolean {
   const runtime = isRecord(payload.runtime) ? payload.runtime : {};
   const decision = isRecord(runtime.lastDecision) ? runtime.lastDecision : {};
   return new Set([
-    "vehicle_moving", "vehicle_open", "not_plugged", "battery_unknown", "battery_low",
+    "vehicle_moving", "vehicle_open", "vehicle_status_unknown", "not_plugged", "battery_unknown", "battery_low",
     "climate_started", "climate_rejected", "climate_pending", "climate_error",
   ]).has(activityString(decision.code));
 }
@@ -2307,13 +2309,14 @@ function radarPointQueryUrl(config: SnowGuardConfig, layer: string): string {
     REQUEST: "GetFeatureInfo",
     BBOX: `${lat - 0.01},${lon - 0.015},${lat + 0.01},${lon + 0.015}`,
     CRS: "EPSG:4326",
-    WIDTH: "20",
-    HEIGHT: "20",
+    WIDTH: "100",
+    HEIGHT: "100",
     LAYERS: layer,
     QUERY_LAYERS: layer,
+    FORMAT: "image/png",
     INFO_FORMAT: "application/json",
-    I: "10",
-    J: "7",
+    I: "50",
+    J: "50",
   });
   return `${ECCC_GEOMET_WMS_URL}?${query.toString()}`;
 }
@@ -2322,6 +2325,8 @@ interface RadarFeature {
   value: number | null;
   classification: string;
   at: string | null;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 function radarFeatureFromJson(raw: unknown): RadarFeature | null {
@@ -2332,6 +2337,12 @@ function radarFeatureFromJson(raw: unknown): RadarFeature | null {
   if (first === null || typeof first !== "object" || Array.isArray(first)) return null;
   const properties = (first as { properties?: unknown }).properties;
   if (properties === null || typeof properties !== "object" || Array.isArray(properties)) return null;
+  const geometry = (first as { geometry?: unknown }).geometry;
+  const coordinates = geometry !== null && typeof geometry === "object" && !Array.isArray(geometry)
+    ? (geometry as { coordinates?: unknown }).coordinates
+    : null;
+  const longitude = Array.isArray(coordinates) ? finiteNumber(coordinates[0]) : null;
+  const latitude = Array.isArray(coordinates) ? finiteNumber(coordinates[1]) : null;
   const source = properties as Record<string, unknown>;
   const at = typeof source.time === "string"
     ? source.time
@@ -2342,14 +2353,26 @@ function radarFeatureFromJson(raw: unknown): RadarFeature | null {
     value: finiteNumber(source.value),
     classification: typeof source.class === "string" ? source.class : "",
     at,
+    latitude,
+    longitude,
   };
+}
+
+function radarDistanceKm(config: SnowGuardConfig, feature: RadarFeature): number | null {
+  if (feature.latitude === null || feature.longitude === null) return null;
+  return haversineDistanceKm(config.location.latitude, config.location.longitude, feature.latitude, feature.longitude);
 }
 
 async function fetchRadarFeature(config: SnowGuardConfig, layer: string, signal: AbortSignal): Promise<RadarFeature | null> {
   try {
     const response = await fetch(radarPointQueryUrl(config, layer), { signal });
     if (!response.ok) return null;
-    return radarFeatureFromJson(await response.json().catch(() => null));
+    const feature = radarFeatureFromJson(await response.json().catch(() => null));
+    const distanceKm = feature ? radarDistanceKm(config, feature) : null;
+    // GeoMet may return a nearest grid cell outside a tiny GetFeatureInfo box.
+    // A weather controller must reject that rather than pretending it sampled
+    // the parked vehicle's vicinity.
+    return feature && distanceKm !== null && distanceKm <= 2 ? feature : null;
   } catch {
     return null;
   }
@@ -2371,21 +2394,31 @@ async function fetchSnowRadarEvidence(config: SnowGuardConfig, signal: AbortSign
     fetchRadarFeature(config, "Radar_1km_SfcPrecipType", signal),
     fetchRadarFeature(config, "RADAR_1KM_RSNO", signal),
   ]);
-  const phase = snowRadarPhase(phaseFeature?.classification ?? "");
+  const sourceTime = (feature: RadarFeature | null): number | null => {
+    const parsed = feature?.at ? Date.parse(feature.at) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const phaseTime = sourceTime(phaseFeature);
+  const rateTime = sourceTime(rateFeature);
+  // Both independent radar products must be local, recent and time-aligned.
+  const freshness = radarSamplesAreFreshAndAligned(phaseTime, rateTime);
+  const fresh = freshness.fresh;
+  const phase = fresh ? snowRadarPhase(phaseFeature?.classification ?? "") : "unknown";
   const rateClass = (rateFeature?.classification ?? "").toLowerCase();
   // ECCC can expose a small numeric interpolation even when the class is
   // "Undetected". The classification is the evidence, not a raw near-zero.
-  const snowRateCmH = rateFeature && !rateClass.includes("undetected") ? rateFeature.value : 0;
-  const sourceAt = phaseFeature?.at ?? rateFeature?.at ?? null;
-  const parsed = sourceAt ? Date.parse(sourceAt) : Number.NaN;
-  const dataAgeMinutes = Number.isFinite(parsed) ? Math.max(0, Math.round((Date.now() - parsed) / 60_000)) : null;
+  const snowRateCmH = fresh && rateFeature && !rateClass.includes("undetected") ? rateFeature.value : fresh ? 0 : null;
+  const sourceAt = fresh
+    ? (freshness.olderTimestampMs === phaseTime ? phaseFeature?.at ?? null : rateFeature?.at ?? null)
+    : null;
+  const dataAgeMinutes = freshness.dataAgeMinutes;
   return {
     checkedAt,
     sourceAt,
     dataAgeMinutes,
     phase,
     snowRateCmH,
-    fresh: dataAgeMinutes !== null && dataAgeMinutes <= 15,
+    fresh,
   };
 }
 
@@ -2560,6 +2593,7 @@ function snowCalibrationWeather(weather: SnowWeather) {
   return {
     temperatureC: weather.temperatureC,
     wetBulbC: weather.wetBulbC,
+    currentSnowCm: weather.currentSnowCm,
     nextHourSnowCm: weather.nextHourSnowCm,
     nextThreeHoursSnowCm: weather.nextThreeHoursSnowCm,
     precipitationPhase: weather.precipitationPhase,
@@ -2567,6 +2601,11 @@ function snowCalibrationWeather(weather: SnowWeather) {
     confidence: weather.confidence,
     windSpeedKmh: weather.windSpeedKmh,
     windGustKmh: weather.windGustKmh,
+    radarPhase: weather.radar.phase,
+    radarSnowRateCmH: weather.radar.snowRateCmH,
+    radarSourceAt: weather.radar.sourceAt,
+    radarDataAgeMinutes: weather.radar.dataAgeMinutes,
+    radarFresh: weather.radar.fresh,
   };
 }
 
@@ -2834,13 +2873,17 @@ export class SnowGuard {
           { minutes, outcome: result.event.outcome, errorLabel: result.event.errorLabel, batteryPct, pluggedIn },
         );
       }
-      snapshot.runtime.lastRunAt = nowIso;
+      // runClimateStart includes wake-up and confirmation polling. Start the
+      // feedback clock only after the request has returned, never from the
+      // earlier weather/status sample.
+      const climateSubmittedAt = new Date().toISOString();
+      snapshot.runtime.lastRunAt = climateSubmittedAt;
       const outcome = result.event?.outcome ?? "submitted";
       if (outcome === "succeeded") {
         snapshot.calibrationCases = retainSnowCalibrationCases([
           newSnowCalibrationCase({
             id: crypto.randomUUID(),
-            actionAt: nowIso,
+            actionAt: climateSubmittedAt,
             minutes,
             batteryPctAtStart: batteryPct,
             pluggedInAtStart: pluggedIn,

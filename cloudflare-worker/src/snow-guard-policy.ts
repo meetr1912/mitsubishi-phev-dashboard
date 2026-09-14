@@ -54,6 +54,40 @@ export function snowWeatherConfidence(input: {
   return "high";
 }
 
+/** Radar phase and snow-rate products are independent observations. */
+export function radarSamplesAreFreshAndAligned(
+  phaseTimestampMs: number | null,
+  rateTimestampMs: number | null,
+  nowMs = Date.now(),
+): { fresh: boolean; dataAgeMinutes: number | null; olderTimestampMs: number | null } {
+  if (phaseTimestampMs === null || rateTimestampMs === null) {
+    return { fresh: false, dataAgeMinutes: null, olderTimestampMs: null };
+  }
+  if (phaseTimestampMs > nowMs || rateTimestampMs > nowMs) {
+    return { fresh: false, dataAgeMinutes: null, olderTimestampMs: null };
+  }
+  const phaseAge = Math.round((nowMs - phaseTimestampMs) / 60_000);
+  const rateAge = Math.round((nowMs - rateTimestampMs) / 60_000);
+  if (phaseAge < 0 || rateAge < 0 || phaseAge > 12 || rateAge > 12 || Math.abs(phaseTimestampMs - rateTimestampMs) > 12 * 60_000) {
+    return { fresh: false, dataAgeMinutes: null, olderTimestampMs: null };
+  }
+  return {
+    fresh: true,
+    dataAgeMinutes: Math.max(phaseAge, rateAge),
+    olderTimestampMs: Math.min(phaseTimestampMs, rateTimestampMs),
+  };
+}
+
+export function haversineDistanceKm(latitudeA: number, longitudeA: number, latitudeB: number, longitudeB: number): number {
+  const radians = Math.PI / 180;
+  const latA = latitudeA * radians;
+  const latB = latitudeB * radians;
+  const dLat = (latitudeB - latitudeA) * radians;
+  const dLon = (longitudeB - longitudeA) * radians;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(latA) * Math.cos(latB) * Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 export function summarizeSnowSeverity(
   temperatureC: number | null, currentSnowCm: number, nextHourSnowCm: number,
   nextThreeHoursSnowCm: number, weatherCode: number | null,
