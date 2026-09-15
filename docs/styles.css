@@ -638,6 +638,11 @@ svg { display: block; }
 .activity-outcome.timeout,
 .activity-outcome.review { border-color: rgba(179, 91, 0, .25); color: var(--orange); background: var(--orange-wash); }
 .activity-json { max-height: 300px; margin: 0; padding: .72rem; overflow: auto; border-top: 1px solid var(--border); background: var(--surface); color: var(--secondary); font-family: var(--mono); font-size: .65rem; line-height: 1.48; white-space: pre-wrap; overflow-wrap: anywhere; }
+.trend-intro { margin-bottom: .75rem; }
+.trend-card { min-height: 242px; }
+.trend-card h2 { margin: .18rem 0 .85rem; font-size: 1.08rem; letter-spacing: -.025em; }
+.chart-wrap { position: relative; height: 180px; }
+.chart-empty { margin: .5rem 0 0; color: var(--secondary); font-size: .78rem; line-height: 1.4; }
 
 /* Feedback and navigation */
 .pull-indicator {
