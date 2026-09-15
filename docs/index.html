@@ -502,6 +502,23 @@
 
     <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="Trends">
       <section class="section-card trend-intro"><p class="eyebrow">Vehicle data</p><h2>History and distance</h2><p class="section-note">These charts use the encrypted dashboard history already published by the status logger.</p></section>
+      <section class="section-card intelligence-card" aria-label="Vehicle intelligence">
+        <p class="eyebrow">Vehicle intelligence</p><h2>Evidence, not guesses</h2>
+        <div class="trip-intelligence-grid"><div><span>Command reliability</span><strong id="intel-command-rate">—</strong><small id="intel-command-note">Unlock to load activity.</small></div><div><span>Snow readiness</span><strong id="intel-ready">—</strong><small id="intel-ready-note">Unlock to load Snow Guard.</small></div><div><span>Recent distance</span><strong id="intel-trip-baseline">—</strong><small id="intel-trip-note">Need logged distance history.</small></div><div><span>Battery trend</span><strong id="intel-battery-trend">—</strong><small id="intel-battery-note">Reported state only; not a health diagnosis.</small></div></div>
+        <p class="section-note" id="intel-command-failure">Command outcome tracking begins after the next remote request.</p>
+        <p class="section-note" id="intel-weekly-brief">Weekly brief appears when enough logged data exists.</p>
+        <div class="intelligence-changes"><p class="eyebrow">What changed</p><ul id="intel-state-changes"><li>Waiting for published status history.</li></ul></div>
+      </section>
+      <section class="section-card intelligence-card" aria-label="Departure planner">
+        <p class="eyebrow">Departure readiness</p><h2>Plan, then decide</h2>
+        <p class="section-note">This stays on this device and never starts climate automatically. Snow Guard remains the only opt-in automation.</p>
+        <div class="departure-row"><label>Usual departure <input id="intel-departure-time" type="time" value="08:00" /></label><label>Cabin goal <select id="intel-cabin-goal"><option value="comfortable">Comfortable</option><option value="defrost">Defrost priority</option></select></label><button type="button" class="btn-ghost" id="intel-save-departure">Save</button></div>
+        <p class="section-note" id="intel-departure-note">Set a local target to see a readiness reminder.</p>
+      </section>
+      <section class="section-card intelligence-card" aria-label="Snow Guard evidence">
+        <p class="eyebrow">Snow Guard evidence</p><h2>Confidence and outcomes</h2>
+        <div class="trip-intelligence-grid"><div><span>Latest decision</span><strong id="intel-snow-decision">—</strong><small id="intel-snow-note">Unlock to load Snow Guard.</small></div><div><span>Reported outcomes</span><strong id="intel-snow-outcomes">—</strong><small id="intel-snow-outcome-note">Rules remain conservative and do not self-adjust.</small></div></div>
+      </section>
       <section class="section-card trip-intelligence-card" aria-label="Trip intelligence">
         <p class="eyebrow">Trip intelligence</p><h2>Usage, not guesses</h2>
         <div class="trip-intelligence-grid"><div><span>Last 30 days</span><strong id="trip-distance">—</strong><small>logged distance</small></div><div><span>Driving days</span><strong id="trip-active-days">—</strong><small>days with movement</small></div><div><span>Charge starts</span><strong id="trip-charging-sessions">—</strong><small>observed sessions</small></div><div><span>Current month mix</span><strong id="trip-ev-share">—</strong><small>when reported</small></div></div>
@@ -529,6 +546,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   <script src="activity.js" defer></script>
   <script src="trip-intelligence.js" defer></script>
+  <script src="vehicle-intelligence.js" defer></script>
   <script src="charts.js" defer></script>
   <script src="pull-refresh.js" defer></script>
   <script src="shortcuts-setup.js" defer></script>
