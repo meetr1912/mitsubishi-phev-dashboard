@@ -68,6 +68,7 @@ export interface SnowCalibrationSummary {
   meanScreenedBatteryDeltaPct: number | null;
   minimumSample: number;
   readyForReview: boolean;
+  reviewRecommendation: string;
 }
 
 export const SNOW_CALIBRATION_MINIMUM_SAMPLE = 10;
@@ -146,6 +147,14 @@ export function summariseSnowCalibration(cases: readonly SnowCalibrationCase[]):
   const meanScreenedBatteryDeltaPct = screenedBatteryDeltas.length
     ? Math.round((screenedBatteryDeltas.reduce((total, value) => total + value, 0) / screenedBatteryDeltas.length) * 10) / 10
     : null;
+  let reviewRecommendation = "Keep collecting outcomes; Snow Guard will not change its own rules.";
+  if (responses >= SNOW_CALIBRATION_MINIMUM_SAMPLE && usefulRate !== null) {
+    reviewRecommendation = usefulRate >= 0.8
+      ? "Evidence supports the current conservative guardrails."
+      : usefulRate <= 0.4
+        ? "Evidence is weak; keep automation conservative and review conditions before widening it."
+        : "Results are mixed; review conditions manually before changing guardrails.";
+  }
   return {
     eligibleActions: cases.length,
     responses,
@@ -157,6 +166,7 @@ export function summariseSnowCalibration(cases: readonly SnowCalibrationCase[]):
     meanScreenedBatteryDeltaPct,
     minimumSample: SNOW_CALIBRATION_MINIMUM_SAMPLE,
     readyForReview: responses >= SNOW_CALIBRATION_MINIMUM_SAMPLE,
+    reviewRecommendation,
   };
 }
 

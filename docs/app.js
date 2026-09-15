@@ -1634,7 +1634,7 @@
     }
     snowGuardCalibrationEl.hidden = false;
     snowGuardCalibrationEl.textContent = calibration.responses + " outcomes: " + calibration.clear + " clear, " + calibration.partial + " partial, " + calibration.noBenefit + " no benefit · " + useful + batteryNote + ". " +
-      (calibration.readyForReview ? "Enough evidence for a threshold review." : (calibration.minimumSample - calibration.responses) + " more before threshold review.");
+      (calibration.reviewRecommendation || (calibration.readyForReview ? "Enough evidence for a threshold review." : (calibration.minimumSample - calibration.responses) + " more before threshold review."));
   }
 
   function renderSnowGuard(body) {

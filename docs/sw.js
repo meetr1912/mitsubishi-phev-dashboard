@@ -18,6 +18,7 @@ var SHELL_ASSETS = [
   "./data-contract.js",
   "./app.js",
   "./activity.js",
+  "./trip-intelligence.js",
   "./charts.js",
   "./crypto.js",
   "./nav.js",

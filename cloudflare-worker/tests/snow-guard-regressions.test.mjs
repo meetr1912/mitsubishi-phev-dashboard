@@ -68,6 +68,7 @@ test("Snow Guard calibration accepts only bounded, idempotent outcome choices", 
   assert.deepEqual(summariseSnowCalibration(cases), {
     eligibleActions: 2, responses: 1, clear: 1, partial: 0, noBenefit: 0,
     usefulRate: 1, screenedBatterySamples: 1, meanScreenedBatteryDeltaPct: -1, minimumSample: 10, readyForReview: false,
+    reviewRecommendation: "Keep collecting outcomes; Snow Guard will not change its own rules.",
   });
 });
 
