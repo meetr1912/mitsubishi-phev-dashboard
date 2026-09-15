@@ -330,6 +330,7 @@
     renderDayChart(all);
     renderBreakdown(all);
     renderLog();
+    document.dispatchEvent(new CustomEvent("phev:activity", { detail: { records: all } }));
     if (downloadBtn) downloadBtn.disabled = !all.length;
   }
 

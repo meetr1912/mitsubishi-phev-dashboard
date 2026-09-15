@@ -644,6 +644,15 @@ svg { display: block; }
 .chart-wrap { position: relative; height: 180px; }
 .chart-empty { margin: .5rem 0 0; color: var(--secondary); font-size: .78rem; line-height: 1.4; }
 .trip-intelligence-card { margin-bottom: .75rem; }
+.intelligence-card { margin-bottom: .75rem; }
+.intelligence-changes { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+.intelligence-changes .eyebrow { margin: 0; }
+.intelligence-changes ul { display: grid; gap: .35rem; margin: .55rem 0 0; padding: 0; list-style: none; }
+.intelligence-changes li { padding: .55rem .62rem; border-radius: 9px; background: var(--surface-muted); color: var(--secondary); font-size: .72rem; line-height: 1.35; }
+.departure-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: .55rem; align-items: end; margin-top: .75rem; }
+.departure-row label { display: grid; gap: .3rem; color: var(--secondary); font-size: .68rem; font-weight: 650; }
+.departure-row input, .departure-row select { min-width: 0; padding: .55rem; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--surface-muted); font: inherit; }
+.departure-row .btn-ghost { padding: .56rem .65rem; }
 .trip-intelligence-card h2 { margin: .18rem 0 .85rem; font-size: 1.08rem; letter-spacing: -.025em; }
 .trip-intelligence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
 .trip-intelligence-grid > div { padding: .7rem; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-muted); }

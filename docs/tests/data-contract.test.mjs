@@ -37,7 +37,7 @@ test("main page and service worker load the data contract before the decryptor",
     readFile(new URL("sw.js", root), "utf8"),
   ]);
   assert.ok(page.indexOf('src="data-contract.js"') < page.indexOf('src="crypto.js"'));
-  assert.match(worker, /phev-shell-v15/);
+  assert.match(worker, /phev-shell-v16/);
   assert.match(worker, /"\.\/data-contract\.js"/);
   assert.match(worker, /Network-first prevents a deployed layout/);
   assert.doesNotMatch(worker, /cached \|\| networkFetch/);

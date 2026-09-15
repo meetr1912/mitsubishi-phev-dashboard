@@ -1640,6 +1640,7 @@
   function renderSnowGuard(body) {
     if (!body) return;
     snowGuardState = body;
+    document.dispatchEvent(new CustomEvent("phev:snow-guard", { detail: body }));
     var config = body.config || {};
     var runtime = body.runtime || {};
     if (snowGuardEnabledEl) snowGuardEnabledEl.checked = config.enabled === true;
