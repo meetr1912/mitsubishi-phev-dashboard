@@ -62,7 +62,7 @@
   function snowEvidence(snow) {
     var runtime = snow && snow.runtime || {}, decision = runtime.lastDecision || {}, calibration = snow && snow.calibration || {};
     var confidence = decision.weather && decision.weather.confidence;
-    return { code: decision.code || null, confidence: confidence || null, summary: decision.summary || null, responses: number(calibration.responses), usefulRate: number(calibration.usefulRate), recommendation: calibration.reviewRecommendation || null };
+    return { code: decision.code || null, confidence: confidence || null, summary: decision.summary || null, responses: number(calibration.responses), usefulRate: number(calibration.usefulRate), recommendation: calibration.reviewRecommendation || null, model: snow && snow.intelligence || null };
   }
   function departurePlan(data, snow, preference) {
     var plan = preference || {}, latest = data && data.latest || {}, ready = readiness(data, snow), target = typeof plan.time === "string" ? plan.time : null;
@@ -89,7 +89,8 @@
     text("intel-snow-decision", evidence.code ? label(evidence.code) : "—");
     text("intel-snow-note", evidence.summary ? evidence.summary + (evidence.confidence ? " · " + evidence.confidence + " confidence." : "") : "No Snow Guard decision recorded yet.");
     text("intel-snow-outcomes", evidence.responses === null ? "—" : String(evidence.responses));
-    text("intel-snow-outcome-note", evidence.responses === null ? "Rules remain conservative and do not self-adjust." : (evidence.usefulRate === null ? "Outcome feedback is recorded." : Math.round(evidence.usefulRate * 100) + "% useful feedback.") + (evidence.recommendation ? " " + evidence.recommendation : ""));
+    var modelNote = evidence.model && evidence.model.message ? " Bayesian advisor: " + evidence.model.message : "";
+    text("intel-snow-outcome-note", (evidence.responses === null ? "Rules remain conservative and do not self-adjust." : (evidence.usefulRate === null ? "Outcome feedback is recorded." : Math.round(evidence.usefulRate * 100) + "% useful feedback.") + (evidence.recommendation ? " " + evidence.recommendation : "")) + modelNote);
     var base = tripBaseline(data);
     text("intel-trip-baseline", base.days ? base.recentKm.toFixed(1) + " km" : "—");
     text("intel-trip-note", base.deltaPct === null ? "Need two full 7-day windows before comparison." : Math.abs(base.deltaPct) < 10 ? "Within 10% of the prior 7 days." : (base.deltaPct > 0 ? "+" : "") + base.deltaPct + "% versus the prior 7 days. Distance only; not an efficiency claim.");
