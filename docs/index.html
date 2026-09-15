@@ -54,6 +54,12 @@
       <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <path d="M20 11a8 8 0 1 0-.7 4.3M20 5v6h-6" />
       </symbol>
+      <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 19V5M4 19h16M7 15l3-4 3 2 4-6" />
+      </symbol>
+      <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 4v15a1 1 0 0 0 1 1h15M7.5 14.5 11 10l3 2.4 4.5-5.4" />
+      </symbol>
       <symbol id="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3.2" />
         <path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" />
@@ -469,18 +475,55 @@
       </section>
       <p class="app-footer" id="veh-vin">—</p>
     </div>
+
+    <div class="tab-view" id="tab-activity" data-tab="activity" role="tabpanel" aria-label="Activity">
+      <section class="section-card activity-intro">
+        <div class="section-row">
+          <div><p class="eyebrow">Activity</p><h2>Vehicle action trail</h2></div>
+          <button type="button" class="activity-refresh" id="activity-refresh" aria-label="Refresh activity log"><svg aria-hidden="true"><use href="#icon-refresh" /></svg><span>Refresh</span></button>
+        </div>
+        <p class="section-note">Every authenticated command, status refresh, and vehicle validation is saved with its final result. Credentials, VIN, location, and raw API payloads are excluded.</p>
+        <p id="activity-status" class="activity-status" role="status" aria-live="polite">Unlock to load activity.</p>
+      </section>
+      <section class="activity-summary-grid" aria-label="Activity summary">
+        <article class="activity-summary-card"><span>Last 30 days</span><strong id="activity-total">—</strong><small>recorded requests</small></article>
+        <article class="activity-summary-card"><span>Confirmed</span><strong id="activity-confirmed">—</strong><small>vehicle actions</small></article>
+        <article class="activity-summary-card activity-summary-card--attention"><span>Needs review</span><strong id="activity-attention">—</strong><small>failed or timed out</small></article>
+        <article class="activity-summary-card"><span>Avg. round-trip</span><strong id="activity-duration">—</strong><small>all requests</small></article>
+      </section>
+      <section class="section-card activity-chart-card"><div class="section-row"><div><p class="eyebrow">Last 7 days</p><h2>Requests by day</h2></div><span class="activity-chart-total" id="activity-week-total">—</span></div><div class="activity-day-chart" id="activity-day-chart" aria-label="Requests by day chart"></div></section>
+      <section class="section-card activity-chart-card"><div class="section-row"><div><p class="eyebrow">Most used</p><h2>Actions and validations</h2></div></div><div class="activity-breakdown" id="activity-breakdown" aria-label="Activity by action"></div></section>
+      <section class="section-card activity-log-card">
+        <div class="section-row"><div><p class="eyebrow">Structured log</p><h2>Request results</h2></div><button type="button" class="activity-download" id="activity-download" disabled>Download JSON</button></div>
+        <div class="activity-filters" role="group" aria-label="Filter activity log"><button type="button" class="activity-filter active" data-activity-filter="all">All</button><button type="button" class="activity-filter" data-activity-filter="command">Commands</button><button type="button" class="activity-filter" data-activity-filter="validation">Checks</button><button type="button" class="activity-filter" data-activity-filter="attention">Needs review</button></div>
+        <div class="activity-log" id="activity-log"></div>
+      </section>
+    </div>
+
+    <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="Trends">
+      <section class="section-card trend-intro"><p class="eyebrow">Vehicle data</p><h2>History and distance</h2><p class="section-note">These charts use the encrypted dashboard history already published by the status logger.</p></section>
+      <section class="section-card trend-card"><h2>Battery history</h2><div class="chart-wrap"><canvas id="chart-battery"></canvas></div><p class="chart-empty" id="empty-battery" hidden>No battery history yet.</p></section>
+      <section class="section-card trend-card"><h2>Odometer history</h2><div class="chart-wrap"><canvas id="chart-odometer"></canvas></div><p class="chart-empty" id="empty-odometer" hidden>No odometer history yet.</p></section>
+      <section class="section-card trend-card"><h2>Daily distance</h2><div class="chart-wrap"><canvas id="chart-daily"></canvas></div><p class="chart-empty" id="empty-daily" hidden>No daily distance history yet.</p></section>
+      <section class="section-card trend-card"><h2>Monthly distance</h2><div class="chart-wrap"><canvas id="chart-monthly"></canvas></div><p class="chart-empty" id="empty-monthly" hidden>No monthly distance history yet.</p></section>
+    </div>
   </main>
 
   <nav class="tab-bar" role="tablist" aria-label="Dashboard sections">
     <button type="button" class="tab-btn active" data-tab="status" role="tab" aria-selected="true" aria-controls="tab-status"><svg aria-hidden="true"><use href="#icon-home" /></svg><span>Home</span></button>
     <button type="button" class="tab-btn" data-tab="climate" role="tab" aria-selected="false" aria-controls="tab-climate"><svg aria-hidden="true"><use href="#icon-fan" /></svg><span>Climate</span></button>
     <button type="button" class="tab-btn" data-tab="vehicle" role="tab" aria-selected="false" aria-controls="tab-vehicle"><svg aria-hidden="true"><use href="#icon-lock" /></svg><span>Vehicle</span></button>
+    <button type="button" class="tab-btn" data-tab="activity" role="tab" aria-selected="false" aria-controls="tab-activity"><svg aria-hidden="true"><use href="#icon-activity" /></svg><span>Activity</span></button>
+    <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history"><svg aria-hidden="true"><use href="#icon-chart" /></svg><span>Trends</span></button>
   </nav>
 
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
   <script src="data-contract.js" defer></script>
   <script src="crypto.js" defer></script>
   <script src="app.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  <script src="activity.js" defer></script>
+  <script src="charts.js" defer></script>
   <script src="pull-refresh.js" defer></script>
   <script src="shortcuts-setup.js" defer></script>
   <script src="nav.js" defer></script>

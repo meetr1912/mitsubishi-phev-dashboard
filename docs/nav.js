@@ -1,9 +1,9 @@
-/* nav.js — three task-focused sections. Nodes stay mounted so a climate
+/* nav.js — task-focused sections. Nodes stay mounted so a climate
  * selection or schedule draft is never lost while switching sections. */
 (function () {
   "use strict";
 
-  var TABS = ["status", "climate", "vehicle", "activity"];
+  var TABS = ["status", "climate", "vehicle", "activity", "history"];
   var bar = document.querySelector(".tab-bar");
   var views = {};
   TABS.forEach(function (t) { views[t] = document.getElementById("tab-" + t); });
@@ -28,6 +28,7 @@
 
     // Let any native controls reflow after the new section is visible.
     requestAnimationFrame(function () {
+      if (name === "history" && window.PHEV && typeof window.PHEV.resizeCharts === "function") window.PHEV.resizeCharts();
       window.dispatchEvent(new Event("resize"));
       document.dispatchEvent(new CustomEvent("phev:tabchange", { detail: { tab: name } }));
     });
