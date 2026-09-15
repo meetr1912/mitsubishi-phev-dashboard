@@ -502,6 +502,11 @@
 
     <div class="tab-view" id="tab-history" data-tab="history" role="tabpanel" aria-label="Trends">
       <section class="section-card trend-intro"><p class="eyebrow">Vehicle data</p><h2>History and distance</h2><p class="section-note">These charts use the encrypted dashboard history already published by the status logger.</p></section>
+      <section class="section-card trip-intelligence-card" aria-label="Trip intelligence">
+        <p class="eyebrow">Trip intelligence</p><h2>Usage, not guesses</h2>
+        <div class="trip-intelligence-grid"><div><span>Last 30 days</span><strong id="trip-distance">—</strong><small>logged distance</small></div><div><span>Driving days</span><strong id="trip-active-days">—</strong><small>days with movement</small></div><div><span>Charge starts</span><strong id="trip-charging-sessions">—</strong><small>observed sessions</small></div><div><span>Current month mix</span><strong id="trip-ev-share">—</strong><small>when reported</small></div></div>
+        <p class="section-note" id="trip-intelligence-note">Unlock to analyse logged history.</p>
+      </section>
       <section class="section-card trend-card"><h2>Battery history</h2><div class="chart-wrap"><canvas id="chart-battery"></canvas></div><p class="chart-empty" id="empty-battery" hidden>No battery history yet.</p></section>
       <section class="section-card trend-card"><h2>Odometer history</h2><div class="chart-wrap"><canvas id="chart-odometer"></canvas></div><p class="chart-empty" id="empty-odometer" hidden>No odometer history yet.</p></section>
       <section class="section-card trend-card"><h2>Daily distance</h2><div class="chart-wrap"><canvas id="chart-daily"></canvas></div><p class="chart-empty" id="empty-daily" hidden>No daily distance history yet.</p></section>
@@ -523,6 +528,7 @@
   <script src="app.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   <script src="activity.js" defer></script>
+  <script src="trip-intelligence.js" defer></script>
   <script src="charts.js" defer></script>
   <script src="pull-refresh.js" defer></script>
   <script src="shortcuts-setup.js" defer></script>

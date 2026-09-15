@@ -643,6 +643,12 @@ svg { display: block; }
 .trend-card h2 { margin: .18rem 0 .85rem; font-size: 1.08rem; letter-spacing: -.025em; }
 .chart-wrap { position: relative; height: 180px; }
 .chart-empty { margin: .5rem 0 0; color: var(--secondary); font-size: .78rem; line-height: 1.4; }
+.trip-intelligence-card { margin-bottom: .75rem; }
+.trip-intelligence-card h2 { margin: .18rem 0 .85rem; font-size: 1.08rem; letter-spacing: -.025em; }
+.trip-intelligence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
+.trip-intelligence-grid > div { padding: .7rem; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-muted); }
+.trip-intelligence-grid span, .trip-intelligence-grid small { display: block; color: var(--secondary); font-size: .65rem; line-height: 1.25; }
+.trip-intelligence-grid strong { display: block; margin: .34rem 0 .18rem; color: var(--text); font-size: 1.15rem; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
 
 /* Feedback and navigation */
 .pull-indicator {
