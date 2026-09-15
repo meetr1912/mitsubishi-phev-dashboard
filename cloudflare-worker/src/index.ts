@@ -53,6 +53,7 @@ import {
   type SnowCalibrationSummary,
   type SnowFeedbackOutcome,
 } from "./snow-guard-calibration";
+import { summariseSnowIntelligence, type SnowIntelligenceSummary } from "./snow-guard-intelligence";
 import { CORS_ALLOW_METHODS, UPSTREAM_RESPONSE_WITHHELD } from "./worker-safety";
 
 // ---------------------------------------------------------------------------
@@ -2396,6 +2397,7 @@ interface SnowGuardSnapshot {
   events: SnowGuardEvent[];
   calibrationCases: SnowCalibrationCase[];
   calibration: SnowCalibrationSummary;
+  intelligence: SnowIntelligenceSummary;
   feedbackPrompt: ReturnType<typeof snowFeedbackPrompt>;
 }
 
@@ -2924,6 +2926,7 @@ export class SnowGuard {
       events: Array.isArray(storedEvents) ? storedEvents : [],
       calibrationCases,
       calibration: summariseSnowCalibration(calibrationCases),
+      intelligence: summariseSnowIntelligence(calibrationCases),
       feedbackPrompt: snowFeedbackPrompt(calibrationCases),
     };
   }
@@ -2949,6 +2952,7 @@ export class SnowGuard {
     ].slice(0, 40);
     snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases);
     snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+    snapshot.intelligence = summariseSnowIntelligence(snapshot.calibrationCases, decision.weather ? { weather: snowCalibrationWeather(decision.weather) } : undefined);
     snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases);
     await this.save(snapshot);
     return snapshot;
@@ -2973,6 +2977,7 @@ export class SnowGuard {
     target.feedbackAt = new Date(now).toISOString();
     snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases, now);
     snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+    snapshot.intelligence = summariseSnowIntelligence(snapshot.calibrationCases);
     snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases, now);
     // First persist the user outcome. The optional measurement below must
     // never cause a one-tap feedback response to be lost or rejected.
@@ -2980,6 +2985,7 @@ export class SnowGuard {
     if (await this.capturePostCycleBattery(target, now)) {
       snapshot.calibrationCases = retainSnowCalibrationCases(snapshot.calibrationCases, now);
       snapshot.calibration = summariseSnowCalibration(snapshot.calibrationCases);
+      snapshot.intelligence = summariseSnowIntelligence(snapshot.calibrationCases);
       snapshot.feedbackPrompt = snowFeedbackPrompt(snapshot.calibrationCases, now);
       await this.save(snapshot);
     }
