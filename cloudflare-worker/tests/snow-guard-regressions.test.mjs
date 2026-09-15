@@ -4,6 +4,7 @@ import test from "node:test";
 import { SerialMutationQueue } from "../.test-dist/src/serial-mutation-queue.js";
 import { classifyPrecipitationPhase, haversineDistanceKm, radarSamplesAreFreshAndAligned, snowAdhesionRisk, snowWeatherConfidence, summarizeSnowSeverity } from "../.test-dist/src/snow-guard-policy.js";
 import { isSnowFeedbackOutcome, screenedReportedBatteryDeltaPct, snowFeedbackPrompt, summariseSnowCalibration } from "../.test-dist/src/snow-guard-calibration.js";
+import { snowContext, summariseSnowIntelligence } from "../.test-dist/src/snow-guard-intelligence.js";
 import { CORS_ALLOW_METHODS, UPSTREAM_RESPONSE_WITHHELD } from "../.test-dist/src/worker-safety.js";
 import { isFreshVhrRefreshEvidence, parseHealthCalibrationTelemetry, telemetryEpochMs, telemetryTimestampIsRecent } from "../.test-dist/src/snow-guard-telemetry.js";
 import {
@@ -70,6 +71,21 @@ test("Snow Guard calibration accepts only bounded, idempotent outcome choices", 
     usefulRate: 1, screenedBatterySamples: 1, meanScreenedBatteryDeltaPct: -1, minimumSample: 10, readyForReview: false,
     reviewRecommendation: "Keep collecting outcomes; Snow Guard will not change its own rules.",
   });
+});
+
+test("Snow Guard Bayesian advisor only prefers a duration with comparable evidence", () => {
+  const weather = { temperatureC: -2, precipitationPhase: "snow", adhesionRisk: "high" };
+  const cases = Array.from({ length: 8 }, (_, index) => ({
+    id: String(index), actionAt: "2026-12-01T11:00:00Z", eligibleAt: "2026-12-01T11:20:00Z", expiresAt: "2026-12-02T23:00:00Z",
+    minutes: index < 4 ? 20 : 30, batteryPctAtStart: null, pluggedInAtStart: null, odometerKmAtStart: null, weather,
+    outcome: index < 4 ? "no_benefit" : "clear",
+  }));
+  assert.equal(snowContext(cases[0]), "temp_near_freezing|phase_snow|adhesion_high");
+  const summary = summariseSnowIntelligence(cases, { weather });
+  assert.equal(summary.recommendation, "prefer_30");
+  assert.equal(summary.evidence[0].samples, 4);
+  assert.equal(summary.evidence[1].samples, 4);
+  assert.equal(summariseSnowIntelligence(cases.slice(0, 4), { weather }).recommendation, "collect_more");
 });
 
 test("Snow Guard keeps reported battery deltas only for a screened VHR observation", () => {
