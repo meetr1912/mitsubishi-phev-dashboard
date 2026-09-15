@@ -7,7 +7,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test tests/*.test.mjs"
+    "test": "tsc -p tsconfig.test.json && node --test tests/*.test.mjs ../docs/tests/*.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250701.0",

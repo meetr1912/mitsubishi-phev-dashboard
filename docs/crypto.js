@@ -86,7 +86,24 @@
 
   // ---- fetch helpers ----
   async function fetchJson(url) {
-    var res = await fetch(url, { cache: "no-store" });
+    // A static-host request can otherwise remain pending indefinitely on a
+    // captive portal or a transient Pages/CDN issue.  Give the user a bounded,
+    // retryable failure instead of leaving the unlock screen busy forever.
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    var timeout = controller ? setTimeout(function () { controller.abort(); }, 15000) : null;
+    var res;
+    try {
+      res = await fetch(url, { cache: "no-store", signal: controller ? controller.signal : undefined });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        var timeoutError = new Error("data_timeout");
+        timeoutError.code = "data_timeout";
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
     if (!res.ok) {
       var err = new Error("HTTP " + res.status);
       err.status = res.status;
@@ -119,7 +136,13 @@
     var iv = b64ToBytes(payload.iv_b64);
     var ct = b64ToBytes(payload.ciphertext_b64);
     // Throws OperationError on wrong password / tampered data.
-    return decryptWith(key, iv, ct);
+    var data = await decryptWith(key, iv, ct);
+    if (!window.PHEV.validateDataDocument) {
+      var contractError = new Error("data_contract_unavailable");
+      contractError.code = "data_contract_unavailable";
+      throw contractError;
+    }
+    return window.PHEV.validateDataDocument(data);
   }
 
   function cachePassphrase(pw) {
@@ -283,6 +306,10 @@
     } catch (e) {
       if (e.code === "meta_missing" || e.code === "data_missing") {
         setError("No data available yet — the logger hasn't published a file. Try again later.");
+      } else if (e.code === "data_timeout") {
+        setError("The dashboard data request timed out. Check your connection and retry.");
+      } else if (e.code === "data_empty" || e.code === "data_invalid" || e.code === "data_contract_unavailable") {
+        setError("The published dashboard data is invalid. The logger needs attention; no stale values were shown.");
       } else {
         setError("Wrong passphrase — try again.");
       }
@@ -338,6 +365,10 @@
       subEl.textContent = "Enter your dashboard passphrase";
       if (e.code === "meta_missing" || e.code === "data_missing") {
         setError("No data available yet — try again later.");
+      } else if (e.code === "data_timeout") {
+        setError("The dashboard data request timed out. Check your connection and retry.");
+      } else if (e.code === "data_empty" || e.code === "data_invalid" || e.code === "data_contract_unavailable") {
+        setError("The published dashboard data is invalid. The logger needs attention; no stale values were shown.");
       } else {
         // Stale/rotated passphrase — clear it so the user re-enters.
         try { localStorage.removeItem(LS_PW); localStorage.removeItem(LS_PW_TS); } catch (_) {}
