@@ -28,4 +28,7 @@ test("encrypted vehicle history is published and never part of the service-worke
   assert.equal(JSON.parse(meta).schema_version, 1);
   assert.ok(encrypted.size > 1024, "expected a non-empty encrypted vehicle-history payload");
   assert.match(serviceWorker, /url\.pathname\.indexOf\("\/data\/"\) !== -1/);
+  assert.match(serviceWorker, /phev-shell-v15/);
+  assert.match(serviceWorker, /Network-first prevents a deployed layout/);
+  assert.doesNotMatch(serviceWorker, /cached \|\| networkFetch/);
 });

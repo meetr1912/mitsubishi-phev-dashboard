@@ -10,7 +10,7 @@
  * Bump CACHE_NAME whenever the shell asset list changes so activate() cleans
  * out the old version.
  */
-var CACHE_NAME = "phev-shell-v14";
+var CACHE_NAME = "phev-shell-v15";
 var SHELL_ASSETS = [
   "./",
   "./index.html",
@@ -65,23 +65,18 @@ self.addEventListener("fetch", function (event) {
   var url = new URL(event.request.url);
   if (!isShellRequest(url)) return;
 
-  // Stale-while-revalidate: serve the cached shell instantly if we have it,
-  // while still fetching a fresh copy in the background to update the cache
-  // for next time. First-ever visit (nothing cached yet) just waits on the
-  // network like normal. Offline with nothing cached still fails normally --
-  // this is a speed optimization, not an offline guarantee.
+  // Network-first prevents a deployed layout from being masked by an older
+  // app shell. The cache is only an offline fallback; this matters on iOS
+  // where an installed web app can otherwise keep an old tab layout alive.
   event.respondWith(
-    caches.match(event.request).then(function (cached) {
-      var networkFetch = fetch(event.request)
-        .then(function (res) {
-          if (res && res.ok) {
-            var copy = res.clone();
-            caches.open(CACHE_NAME).then(function (cache) { cache.put(event.request, copy); });
-          }
-          return res;
-        })
-        .catch(function () { return cached; });
-      return cached || networkFetch;
-    })
+    fetch(event.request)
+      .then(function (res) {
+        if (res && res.ok) {
+          var copy = res.clone();
+          caches.open(CACHE_NAME).then(function (cache) { cache.put(event.request, copy); });
+        }
+        return res;
+      })
+      .catch(function () { return caches.match(event.request); })
   );
 });
